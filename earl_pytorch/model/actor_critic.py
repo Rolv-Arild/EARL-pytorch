@@ -1,7 +1,7 @@
 import torch
 from torch import nn as nn
 
-from earl.model.earl import EARL
+from .earl import EARL
 
 
 class EARLActorCritic(nn.Module):
@@ -19,4 +19,5 @@ class EARLActorCritic(nn.Module):
     def forward(self, *x):
         cls, ball, blue, orange = self.earl(*x)
         players = torch.cat((blue, orange), dim=1)
-        return self.critic(cls).squeeze(dim=1), self.ground(players).transpose(1, 2), self.aerial(players).transpose(1, 2)
+        return self.critic(cls).squeeze(dim=1), self.ground(players).transpose(1, 2), self.aerial(players).transpose(1,
+                                                                                                                     2)

@@ -44,12 +44,15 @@ def iterate_replays(bc_api, replay_ids=None, replay_folder=None, cache_folder=No
                 with open(cache_file, "rb") as handle:
                     processed = pickle.load(handle)
             else:
-                # try
-                replay_path = os.path.join(replay_folder, replay_file)
-                processed = replay_to_dfs(replay_path)
-                processed = convert_dfs(processed)
-                with open(cache_file, "wb") as handle:
-                    pickle.dump(processed, handle)
+                try:
+                    replay_path = os.path.join(replay_folder, replay_file)
+                    processed = replay_to_dfs(replay_path)
+                    processed = convert_dfs(processed)
+                    with open(cache_file, "wb") as handle:
+                        pickle.dump(processed, handle)
+                except Exception as e:
+                    print(e)
+                    continue
             yield processed
     elif replay_folder is not None and cache_folder is None:
         for replay_file in tqdm(os.listdir(replay_folder), "Replay processing"):
@@ -470,6 +473,7 @@ if __name__ == '__main__':
         if i + 4 * len(x[0]) > len(buf_x[0]):
             np.savez(rf"D:\rokutleg\datasets\x_data-{n}.npz", *[v[:i] for v in buf_x])
             np.savez(rf"D:\rokutleg\datasets\y_data-{n}.npz", *[v[:i] for v in buf_y])
+            print(n)
             buf_x, buf_y = get_base_features(size, 3, 3)
             n += 1
             i = j = 0
@@ -499,3 +503,4 @@ if __name__ == '__main__':
         i = j
     np.savez(rf"D:\rokutleg\datasets\x_data-{n}.npz", *[v[:i] for v in buf_x])
     np.savez(rf"D:\rokutleg\datasets\y_data-{n}.npz", *[v[:i] for v in buf_y])
+    print(n)
