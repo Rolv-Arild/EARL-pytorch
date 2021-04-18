@@ -67,7 +67,7 @@ def iterate_replays(bc_api, replay_ids=None, replay_folder=None, cache_folder=No
             yield processed
 
 
-def replay_to_dfs(replay):
+def replay_to_dfs(replay, frame_mode=15):
     import pandas as pd
     import carball as cb
 
@@ -166,7 +166,10 @@ def replay_to_dfs(replay):
     goal_rallies = rallies[rallies["team"].notna()]
     frames = frames.loc[
         np.r_[tuple(slice(row["start_frame"], row["end_frame"]) for _, row in goal_rallies.iterrows())]]
-    frames = frames.iloc[np.random.randint(0, 15)::15]
+    if isinstance(frame_mode, int):
+        frames = frames.iloc[np.random.randint(0, frame_mode)::frame_mode]
+    else:
+        frames = frames.sample(frac=frame_mode)
 
     return {"frames": frames, "rallies": rallies, "touches": touches, "boost_grabs": boost_grabs, "demos": demos,
             "players": player_df}
