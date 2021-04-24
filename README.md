@@ -15,9 +15,9 @@ from earl_pytorch.model import EARLReplayModel
 from earl_pytorch.dataset.create_dataset import replay_to_dfs, convert_dfs
 
 earl = EARL()
-model = EARLReplayModel(earl)
 
-# Open some replay file
+# Option 1: Open some replay file
+model = EARLReplayModel(earl)
 dfs = replay_to_dfs("2627e02a-aa46-4e13-b66b-b76a32069a07.replay", )
 x_data, y_data = convert_dfs(dfs, tensors=True)
 

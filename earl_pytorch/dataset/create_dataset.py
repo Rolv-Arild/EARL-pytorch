@@ -4,6 +4,8 @@ import pickle
 
 import numpy as np
 import torch
+from torch.utils.data import Dataset
+from torch.utils.data.dataset import T_co
 from tqdm import tqdm
 
 from earl_pytorch.util.util import boost_locations, rotator_to_matrix
@@ -19,8 +21,8 @@ FEATURES = [
 ]
 
 LABELS = [
-    "score", "next_touch", "boost_collect",
-    "demo", "ground_control", "aerial_control"
+    "score", "next_touch", "boost_collect", "demo",
+    "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake"
 ]
 
 BALL_COLS = [4, 5, 6, 13, 14, 15, 16, 17, 18]
@@ -47,24 +49,23 @@ def iterate_replays(bc_api, replay_ids=None, replay_folder=None, cache_folder=No
                 try:
                     replay_path = os.path.join(replay_folder, replay_file)
                     processed = replay_to_dfs(replay_path)
-                    processed = convert_dfs(processed)
                     with open(cache_file, "wb") as handle:
                         pickle.dump(processed, handle)
                 except Exception as e:
+                    # raise e
                     print(e)
                     continue
-            yield processed
+            yield convert_dfs(processed)
     elif replay_folder is not None and cache_folder is None:
         for replay_file in tqdm(os.listdir(replay_folder), "Replay processing"):
             replay_path = os.path.join(replay_folder, replay_file)
             processed = replay_to_dfs(replay_path)
-            processed = convert_dfs(processed)
-            yield processed
+            yield convert_dfs(processed)
     elif replay_folder is None and cache_folder is not None:
         for cache_file in tqdm(os.listdir(cache_folder), "Replay loading"):
             with open(cache_file, "rb") as handle:
                 processed = pickle.load(handle)
-            yield processed
+            yield convert_dfs(processed)
 
 
 def replay_to_dfs(replay, frame_mode=15):
@@ -129,7 +130,7 @@ def replay_to_dfs(replay, frame_mode=15):
             frames[f"{identifier}/boost_amount"] = player.data["boost"].fillna(0.) / 2.55
 
             for col in player.controls.columns:
-                frames[f"{identifier}/{col}_control"] = player.controls[col].astype(float).fillna(0.)
+                frames[f"{identifier}/{col}_control"] = player.controls[col].astype(float)
 
             boost_pickups = player.data["boost"].diff() > 0
             for frame, row in player.data[boost_pickups].iterrows():
@@ -181,20 +182,21 @@ def convert_dfs(dfs, tensors=False):
 
     n_blue = (player_df["identifier"].str.contains("blue")).sum()
     n_orange = (player_df["identifier"].str.contains("orange")).sum()
-    x, y = get_base_features(len(frames), n_blue, n_orange, tensors=tensors)
     if tensors:
         convert_fn = lambda x: torch.from_numpy(x).to(torch.float)
     else:
         convert_fn = lambda x: x
 
+    x, y = get_base_features(len(frames), n_blue, n_orange, tensors=tensors)
     x_ball, x_boost, x_blue, x_orange = x
-    y_score, y_next_touch, y_collect, y_demo, y_ground_control, y_aerial_control = y
+    (y_score, y_next_touch, y_collect, y_demo,
+     y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake) = y
 
     x_ball[:, 0, BALL_COLS] = \
         convert_fn(
             frames[[f"ball/{col}" for col in map(FEATURES.__getitem__, BALL_COLS)]].values)
 
-    bins = np.array([-0.1, 0.1])  # np.arange(0.25 / 2 - 1, 1, 0.25)
+    bins = np.array([-50, -0.1, 0.1])  # np.arange(0.25 / 2 - 1, 1, 0.25)
 
     for identifier in player_df["identifier"]:
         color, n = identifier.split("_")
@@ -211,17 +213,32 @@ def convert_dfs(dfs, tensors=False):
             convert_fn(frames[[f"{identifier}/{col}" for col in
                                map(FEATURES.__getitem__, PLAYER_COLS)]].values)
 
-        throttle = np.digitize(frames[f"{identifier}/throttle_control"].values, bins)
-        steer = np.digitize(frames[f"{identifier}/steer_control"].values, bins)
-        pitch = np.digitize(frames[f"{identifier}/pitch_control"].values, bins)
-        yaw = np.digitize(frames[f"{identifier}/yaw_control"].values, bins)
-        roll = np.digitize(frames[f"{identifier}/roll_control"].values, bins)
-        jump = frames[f"{identifier}/jump_control"].astype(int).values
-        boost = frames[f"{identifier}/boost_control"].astype(int).values
-        handbrake = frames[f"{identifier}/handbrake_control"].astype(int).values
+        throttle = np.digitize(frames[f"{identifier}/throttle_control"].fillna(-100).values, bins) - 1
+        steer = np.digitize(frames[f"{identifier}/steer_control"].fillna(-100).values, bins) - 1
+        pitch = np.digitize(frames[f"{identifier}/pitch_control"].fillna(-100).values, bins) - 1
+        yaw = np.digitize(frames[f"{identifier}/yaw_control"].fillna(-100).values, bins) - 1
+        roll = np.digitize(frames[f"{identifier}/roll_control"].fillna(-100).values, bins) - 1
+        jump = frames[f"{identifier}/jump_control"].fillna(-100).astype(int).values
+        boost = frames[f"{identifier}/boost_control"].fillna(-100).astype(int).values
+        handbrake = frames[f"{identifier}/handbrake_control"].fillna(-100).astype(int).values
 
-        y_ground_control[:, i] = convert_fn(throttle + 3 * (steer + 3 * (jump + 2 * (boost + 2 * handbrake))))
-        y_aerial_control[:, i] = convert_fn(pitch + 3 * (yaw + 3 * (roll + 3 * (jump + 2 * boost))))
+        throttle[throttle < 0] = -100
+        steer[steer < 0] = -100
+        pitch[pitch < 0] = -100
+        yaw[yaw < 0] = -100
+        roll[roll < 0] = -100
+        jump[jump < 0] = -100
+        boost[boost < 0] = -100
+        handbrake[handbrake < 0] = -100
+
+        y_throttle[:, i] = convert_fn(throttle)
+        y_steer[:, i] = convert_fn(steer)
+        y_pitch[:, i] = convert_fn(pitch)
+        y_yaw[:, i] = convert_fn(yaw)
+        y_roll[:, i] = convert_fn(roll)
+        y_jump[:, i] = convert_fn(jump)
+        y_boost[:, i] = convert_fn(boost)
+        y_handbrake[:, i] = convert_fn(handbrake)
 
     for i, (x, y, z) in enumerate(boost_locations):
         x_boost[:, i, 4] = x
@@ -302,7 +319,8 @@ def convert_dfs(dfs, tensors=False):
                 y_demo[indices, i] = j + n_blue * (v_color == "orange")
                 last_frame = frame
     x_data = [x_ball, x_boost, x_blue, x_orange]
-    y_data = [y_score, y_next_touch, y_collect, y_demo, y_ground_control, y_aerial_control]
+    y_data = [y_score, y_next_touch, y_collect, y_demo,
+              y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake]
 
     # indices = np.concatenate([y_score[20:] - y_score[:-20] != 0, np.array([False] * 20)])
     # x_data = [v[indices] for v in x_data]
@@ -334,17 +352,25 @@ def get_base_features(size, n_blue, n_orange, n_balls=1, n_boosts=34, include_y=
     y_next_touch = initializer.full((size, n_balls,), -100)
     y_collect = initializer.full((size, n_blue + n_orange,), -100)
     y_demo = initializer.full((size, n_blue + n_orange,), -100)
-    y_ground_control = initializer.full((size, n_blue + n_orange), -100)
-    y_aerial_control = initializer.full((size, n_blue + n_orange), -100)
+
+    y_throttle = initializer.full((size, n_blue + n_orange), -100)
+    y_steer = initializer.full((size, n_blue + n_orange), -100)
+    y_pitch = initializer.full((size, n_blue + n_orange), -100)
+    y_yaw = initializer.full((size, n_blue + n_orange), -100)
+    y_roll = initializer.full((size, n_blue + n_orange), -100)
+    y_jump = initializer.full((size, n_blue + n_orange), -100)
+    y_boost = initializer.full((size, n_blue + n_orange), -100)
+    y_handbrake = initializer.full((size, n_blue + n_orange), -100)
 
     return [x_ball, x_boost, x_blue, x_orange], \
-           [y_score, y_next_touch, y_collect, y_demo, y_ground_control, y_aerial_control]
+           [y_score, y_next_touch, y_collect, y_demo,
+            y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake]
 
 
 def normalize(x_data):
     norms = np.array([
         1., 1., 1., 1.,
-        4096., 5120., 2044.,
+        2300., 2300., 2300.,
         1., 1., 1.,
         1., 1., 1.,
         2300., 2300., 2300.,
@@ -387,7 +413,8 @@ def swap_teams(x_data, y_data=None, indices=None):
     if y_data is None:
         return
 
-    y_score, y_next_touch, y_collect, y_demo, y_ground_control, y_aerial_control = y_data
+    (y_score, y_next_touch, y_collect, y_demo,
+     y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake) = y_data
 
     n_players = x_blue.shape[1] + x_orange.shape[1] - 1
     n_boosts = x_boost.shape[1] - 1
@@ -405,8 +432,14 @@ def swap_teams(x_data, y_data=None, indices=None):
         y_demo[indices, :] = n_players - y_demo[indices, :].flip(1)
         y_demo[y_demo > n_players] = -100
 
-        y_ground_control[indices, :] = y_ground_control[indices, :].flip(1)
-        y_aerial_control[indices, :] = y_aerial_control[indices, :].flip(1)
+        y_throttle[indices, :] = y_throttle[indices, :].flip(1)
+        y_steer[indices, :] = y_steer[indices, :].flip(1)
+        y_pitch[indices, :] = y_pitch[indices, :].flip(1)
+        y_yaw[indices, :] = y_yaw[indices, :].flip(1)
+        y_roll[indices, :] = y_roll[indices, :].flip(1)
+        y_jump[indices, :] = y_jump[indices, :].flip(1)
+        y_boost[indices, :] = y_boost[indices, :].flip(1)
+        y_handbrake[indices, :] = y_handbrake[indices, :].flip(1)
     else:
         y_collect[indices, :] = n_boosts - y_collect[indices, ::-1]
         y_collect[y_collect > n_boosts] = -100
@@ -414,11 +447,17 @@ def swap_teams(x_data, y_data=None, indices=None):
         y_demo[indices, :] = n_players - y_demo[indices, ::-1]
         y_demo[y_demo > n_players] = -100
 
-        y_ground_control[indices, :] = y_ground_control[indices, ::-1]
-        y_aerial_control[indices, :] = y_aerial_control[indices, ::-1]
+        y_throttle[indices, :] = y_throttle[indices, ::-1]
+        y_steer[indices, :] = y_steer[indices, ::-1]
+        y_pitch[indices, :] = y_pitch[indices, ::-1]
+        y_yaw[indices, :] = y_yaw[indices, ::-1]
+        y_roll[indices, :] = y_roll[indices, ::-1]
+        y_jump[indices, :] = y_jump[indices, ::-1]
+        y_boost[indices, :] = y_boost[indices, ::-1]
+        y_handbrake[indices, :] = y_handbrake[indices, ::-1]
 
 
-def swap_left_right(x_data, y_data=None, indices=None, suppress_warning=False):
+def swap_left_right(x_data, y_data=None, indices=None):
     swaps = np.array([
         1., 1., 1., 1.,
         -1., 1., 1.,
@@ -428,23 +467,62 @@ def swap_left_right(x_data, y_data=None, indices=None, suppress_warning=False):
         -1., 1., 1.,
         1., 1.
     ])
+    if indices is None:
+        indices = slice(None)
     # Not really necessary for transformer
-    # boost_indices = [0, 2, 1, 4, 3, 6, 5, 7, 9, 8, 11, 10, 14, 13, 12, 18, 17, 16, 15, 21, 20, 19, 23, 22, 25, 24, 28,
-    #                  27, 30, 29, 32, 31, 33]
+    boost_indices = [0, 2, 1, 4, 3, 6, 5, 7, 9, 8, 11, 10, 14, 13, 12, 18, 17,
+                     16, 15, 21, 20, 19, 23, 22, 25, 24, 26, 28, 27, 30, 29, 32, 31, 33]
+    boost_map = {k: v for k, v in zip(range(34), boost_indices)}
+    boost_map[-100] = -100
     x_ball, x_boost, x_blue, x_orange = x_data
     x_ball[indices, :, :] *= swaps
-    x_boost[indices, :, :] *= swaps
+    # x_boost[indices, :, :] *= swaps
+    x_boost[indices, :, :] = x_boost[indices][:, boost_indices, :] * swaps
     x_blue[indices, :, :] *= swaps
     x_orange[indices, :, :] *= swaps
 
     if y_data is None:
         return
 
-    y_score, y_next_touch, y_collect, y_demo, y_ground_control, y_aerial_control = y_data
-    y_collect[indices, :] = y_collect[indices, :]
+    (y_score, y_next_touch, y_collect, y_demo,
+     y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake) = y_data
+    # y_collect[indices, :] = y_collect[indices, :]
+    y_collect_orig = y_collect.copy()
+    for key, value in boost_map.items():
+        key_indices = y_collect_orig == key
+        keep = key_indices[indices].copy()
+        key_indices[:] = False
+        key_indices[indices] = keep
+        y_collect[key_indices] = value
+    
+    y_steer[indices, :] = 2 - y_steer[indices, :]
+    y_steer[y_steer > 2] = -100
 
-    if not suppress_warning:
-        print("TODO: controls were not swapped")  # TODO
+    y_yaw[indices, :] = 2 - y_yaw[indices, :]
+    y_yaw[y_yaw > 2] = -100
+
+    y_roll[indices, :] = 2 - y_roll[indices, :]
+    y_roll[y_roll > 2] = -100
+
+
+class ReplayCollectionDataset(Dataset):
+    def __init__(self, folder, i=0):
+        files = [f for f in os.listdir(folder) if f.startswith("x_ball") and "npz" not in f]
+        for file in files[i:]:
+            self.x_data = []
+            for name in ("ball", "boost", "blue", "orange"):
+                self.x_data.append(np.load(os.path.join(folder, file.replace("ball", name))))
+            self.y_data = []
+            for name in ("score", "next_touch", "collect", "demo",
+                         "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake"):
+                self.y_data.append(np.load(os.path.join(folder, file.replace("x_ball", f"y_{name}"))))
+            break
+
+    def __getitem__(self, index) -> T_co:
+        return tuple(v[index] for v in self.x_data), tuple(v[index] for v in self.y_data)
+
+    def __len__(self):
+        return self.x_data[0].shape[0]
 
 
 if __name__ == '__main__':
@@ -459,24 +537,43 @@ if __name__ == '__main__':
     print((sum(v.nbytes for v in buf_x) + sum(v.nbytes for v in buf_y)) / 1e9)
     i = j = 0
     n = 0
+    path = r"D:\rokutleg\datasets\rlcsx"
     for replay in iterate_replays(api,
                                   replay_folder=r"D:\rokutleg\replays\rlcsx",
                                   cache_folder=r"D:\rokutleg\processed\rlcsx"):
-        x, y = replay
+        try:
+            x, y = replay
 
-        x_s, y_s = x.copy(), y.copy()
-        swap_teams(x_s, y_s)
+            x_s, y_s = [np.copy(v) for v in x], [np.copy(v) for v in y]
+            # swap_teams(x_s, y_s)
+            # swap_teams(x_s, y_s)
+            # assert all(np.allclose(v, v_s) for v, v_s in zip(x, x_s)) and all(np.allclose(v, v_s) for v, v_s in zip(y, y_s))
+            swap_teams(x_s, y_s)
 
-        x_m, y_m = x.copy(), y.copy()
-        swap_left_right(x_m, y_m, suppress_warning=True)
+            x_m, y_m = [np.copy(v) for v in x], [np.copy(v) for v in y]
+            # swap_left_right(x_m, y_m)
+            # swap_left_right(x_m, y_m)
+            # assert all(np.allclose(v, v_m) for v, v_m in zip(x, x_m)) and all(np.allclose(v, v_m) for v, v_m in zip(y, y_m))
+            swap_left_right(x_m, y_m)
 
-        x_sm, y_sm = x_s.copy(), y_s.copy()
-        swap_left_right(x_sm, y_sm, suppress_warning=True)
+            x_sm, y_sm = [np.copy(v) for v in x_s], [np.copy(v) for v in y_s]
+            # swap_left_right(x_sm, y_sm)
+            # swap_left_right(x_sm, y_sm)
+            # assert all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(x_s, x_sm)) and all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(y_s, y_sm))
+            swap_left_right(x_sm, y_sm)
+            # continue
+        except Exception as e:
+            print(e)
+            continue
 
         if i + 4 * len(x[0]) > len(buf_x[0]):
-            np.savez(rf"D:\rokutleg\datasets\x_data-{n}.npz", *[v[:i] for v in buf_x])
-            np.savez(rf"D:\rokutleg\datasets\y_data-{n}.npz", *[v[:i] for v in buf_y])
-            print(n)
+            normalize(buf_x)
+            for arr, name in zip(buf_x, ("ball", "boost", "blue", "orange")):
+                np.save(rf"{path}\x_{name}-{n}", arr)
+            for arr, name in zip(buf_y, ("score", "next_touch", "collect", "demo",
+                                         "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake")):
+                np.save(rf"{path}\y_{name}-{n}", arr)
+            print("Buffer:", n)
             buf_x, buf_y = get_base_features(size, 3, 3)
             n += 1
             i = j = 0
@@ -504,6 +601,10 @@ if __name__ == '__main__':
             j += len(v_sm)
 
         i = j
-    np.savez(rf"D:\rokutleg\datasets\x_data-{n}.npz", *[v[:i] for v in buf_x])
-    np.savez(rf"D:\rokutleg\datasets\y_data-{n}.npz", *[v[:i] for v in buf_y])
-    print(n)
+    normalize(buf_x)
+    for arr, name in zip(buf_x, ("ball", "boost", "blue", "orange")):
+        np.save(rf"{path}\x_{name}-{n}", arr)
+    for arr, name in zip(buf_y, ("score", "next_touch", "collect", "demo",
+                                 "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake")):
+        np.save(rf"{path}\y_{name}-{n}", arr)
+    print("Buffer:", n)
