@@ -2,7 +2,10 @@
 EARL - Extensible Attention-based Rocket League model
 
 Uses a transformer-like architecture to support any number of in-game entities (balls, boosts, players).
-Can be used for in-game event prediction (`EARLReplayModel`), action prediction (`EARLActorCritic`), rank prediction (`EARLRankModel`) etc.
+Can be used for:
+- In-game event prediction (`EARLReplayModel`), e.g. goals, touches, boost grabs and demos.
+- Action prediction (`EARLActorCritic`), specifically for playing the game, or reinforcement learning through [RLGym](https://github.com/lucas-emery/rocket-league-gym)
+- Rank prediction (`EARLRankModel`), predicting ranks of players from replay data.
 
 ### Installation
 ```
