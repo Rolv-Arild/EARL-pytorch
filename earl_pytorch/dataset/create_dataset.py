@@ -1,8 +1,10 @@
+import itertools
 import logging
 import os
 import pickle
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from torch.utils.data.dataset import T_co
@@ -68,7 +70,7 @@ def iterate_replays(bc_api, replay_ids=None, replay_folder=None, cache_folder=No
             yield convert_dfs(processed)
 
 
-def replay_to_dfs(replay, frame_mode=15):
+def replay_to_dfs(replay, skip_ties=True, skip_kickoffs=True):
     import pandas as pd
     import carball as cb
 
@@ -164,21 +166,31 @@ def replay_to_dfs(replay, frame_mode=15):
     for touch in replay.protobuf_game.game_stats.hits:
         touches.loc[len(touches)] = [touch.frame_number, player_index[touch.player_id.id]]
 
-    goal_rallies = rallies[rallies["team"].notna()]
-    frames = frames.loc[
-        np.r_[tuple(slice(row["start_frame"], row["end_frame"]) for _, row in goal_rallies.iterrows())]]
-    if isinstance(frame_mode, int):
-        frames = frames.iloc[np.random.randint(0, frame_mode)::frame_mode]
-    else:
-        frames = frames.sample(frac=frame_mode)
+    if skip_ties:
+        goal_rallies = rallies[rallies["team"].notna()]
+        frames = frames.loc[
+            np.r_[tuple(slice(row["start_frame"], row["end_frame"]) for _, row in goal_rallies.iterrows())]]
+    elif skip_kickoffs:
+        goal_rallies = rallies
+        frames = frames.loc[
+            np.r_[tuple(slice(row["start_frame"], row["end_frame"]) for _, row in goal_rallies.iterrows())]]
+
+    # if isinstance(frame_mode, int):
+    #     frames = frames.iloc[np.random.randint(0, frame_mode)::frame_mode]
+    # else:
+    #     frames = frames.sample(frac=frame_mode)
 
     return {"frames": frames, "rallies": rallies, "touches": touches, "boost_grabs": boost_grabs, "demos": demos,
             "players": player_df}
 
 
-def convert_dfs(dfs, tensors=False):
+def convert_dfs(dfs, tensors=False, frame_mode=15):
     frames, rallies, touches, boost_grabs, demos, player_df = \
         (dfs[k] for k in ("frames", "rallies", "touches", "boost_grabs", "demos", "players"))
+
+    control_cols = frames.filter(regex="_control$").columns
+    frames[control_cols] = frames[control_cols].shift()
+    frames = frames.iloc[np.random.randint(0, frame_mode)::frame_mode]
 
     n_blue = (player_df["identifier"].str.contains("blue")).sum()
     n_orange = (player_df["identifier"].str.contains("orange")).sum()
@@ -376,13 +388,15 @@ def normalize(x_data):
         2300., 2300., 2300.,
         5.5, 5.5, 5.5,
         100., 1.
-    ])
-    x_ball, x_boost, x_blue, x_orange = x_data
+    ], dtype=np.float32)
+    # x_ball, x_boost, x_blue, x_orange = x_data
 
-    x_ball /= norms
-    x_boost /= norms
-    x_blue /= norms
-    x_orange /= norms
+    for i in range(len(x_data)):
+        x_data[i] /= norms
+    # x_ball /= norms
+    # x_boost /= norms
+    # x_blue /= norms
+    # x_orange /= norms
 
 
 def swap_teams(x_data, y_data=None, indices=None):
@@ -398,17 +412,30 @@ def swap_teams(x_data, y_data=None, indices=None):
         -1., -1., 1.,
         1., 1.
     ])
+
     x_ball, x_boost, x_blue, x_orange = x_data
 
     x_ball[indices, :, :] *= swaps
     if isinstance(x_boost, torch.Tensor):
         x_boost[indices, :, :] = x_boost[indices, :, :].flip(1) * swaps
-        x_blue[indices, :, 4:], x_orange[indices, :, 4:] = \
-            x_orange[indices, :, 4:].flip(1) * swaps[4:], x_blue[indices, :, 4:].flip(1) * swaps[4:]
+
+        if indices == slice(None):
+            x_blue[indices, :, 4:], x_orange[indices, :, 4:] = \
+                x_orange[indices, :, :].flip(1) * swaps, x_blue[indices, :, :].flip(1) * swaps
+            x_data[3], x_data[4] = x_orange, x_blue
+        else:  # Need to be same shape
+            x_blue[indices, :, 4:], x_orange[indices, :, 4:] = \
+                x_orange[indices, :, 4:].flip(1) * swaps[4:], x_blue[indices, :, 4:].flip(1) * swaps[4:]
     else:
         x_boost[indices, :, :] = x_boost[indices, ::-1, :] * swaps
-        x_blue[indices, :, 4:], x_orange[indices, :, 4:] = \
-            x_orange[indices, ::-1, 4:] * swaps[4:], x_blue[indices, ::-1, 4:] * swaps[4:]
+
+        if indices == slice(None):
+            x_blue[indices], x_orange[indices] = \
+                x_orange[indices, ::-1, :] * swaps, x_blue[indices, ::-1, :] * swaps
+            x_data[3], x_data[4] = x_orange, x_blue
+        else:  # Need to be same shape
+            x_blue[indices, :, 4:], x_orange[indices, :, 4:] = \
+                x_orange[indices, ::-1, 4:] * swaps[4:], x_blue[indices, ::-1, 4:] * swaps[4:]
 
     if y_data is None:
         return
@@ -475,6 +502,7 @@ def swap_left_right(x_data, y_data=None, indices=None):
     boost_map = {k: v for k, v in zip(range(34), boost_indices)}
     boost_map[-100] = -100
     x_ball, x_boost, x_blue, x_orange = x_data
+
     x_ball[indices, :, :] *= swaps
     # x_boost[indices, :, :] *= swaps
     x_boost[indices, :, :] = x_boost[indices][:, boost_indices, :] * swaps
@@ -494,7 +522,7 @@ def swap_left_right(x_data, y_data=None, indices=None):
         key_indices[:] = False
         key_indices[indices] = keep
         y_collect[key_indices] = value
-    
+
     y_steer[indices, :] = 2 - y_steer[indices, :]
     y_steer[y_steer > 2] = -100
 
@@ -516,11 +544,13 @@ class ReplayCollectionDataset(Dataset):
             for name in ("score", "next_touch", "collect", "demo",
                          "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake"):
                 self.y_data.append(np.load(os.path.join(folder, file.replace("x_ball", f"y_{name}"))))
+
+            # filtered_indices = np.logical_or.reduce([(v < -100).any(axis=1) for v in self.y_data[1:]])
             break
 
     def __getitem__(self, index) -> T_co:
         return tuple(v[index] for v in self.x_data), tuple(v[index] for v in self.y_data)
-
+    
     def __len__(self):
         return self.x_data[0].shape[0]
 
@@ -532,6 +562,11 @@ if __name__ == '__main__':
     key = sys.argv[1]
 
     api = bc.Api(key)
+    replay_ids = itertools.chain(
+        (r["id"] for r in api.get_group_replays("rlcs-x-eu-split-3-regional-3-012chb5iof")),
+        (r["id"] for r in api.get_group_replays("rlcs-x-na-split-3-regional-3-m2j1wbxoxy"))
+    )
+
     size = 1_000_000
     buf_x, buf_y = get_base_features(size, 3, 3)
     print((sum(v.nbytes for v in buf_x) + sum(v.nbytes for v in buf_y)) / 1e9)
@@ -539,6 +574,7 @@ if __name__ == '__main__':
     n = 0
     path = r"D:\rokutleg\datasets\rlcsx"
     for replay in iterate_replays(api,
+                                  # replay_ids=replay_ids,
                                   replay_folder=r"D:\rokutleg\replays\rlcsx",
                                   cache_folder=r"D:\rokutleg\processed\rlcsx"):
         try:
@@ -562,6 +598,8 @@ if __name__ == '__main__':
             # assert all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(x_s, x_sm)) and all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(y_s, y_sm))
             swap_left_right(x_sm, y_sm)
             # continue
+            assert not any(np.isnan(v).any() for v in x), "NaN in x"
+            assert not any(np.isnan(v).any() for v in y), "NaN in x"
         except Exception as e:
             print(e)
             continue
@@ -569,10 +607,10 @@ if __name__ == '__main__':
         if i + 4 * len(x[0]) > len(buf_x[0]):
             normalize(buf_x)
             for arr, name in zip(buf_x, ("ball", "boost", "blue", "orange")):
-                np.save(rf"{path}\x_{name}-{n}", arr)
+                np.save(rf"{path}\x_{name}-{n}", arr[:i])
             for arr, name in zip(buf_y, ("score", "next_touch", "collect", "demo",
                                          "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake")):
-                np.save(rf"{path}\y_{name}-{n}", arr)
+                np.save(rf"{path}\y_{name}-{n}", arr[:i])
             print("Buffer:", n)
             buf_x, buf_y = get_base_features(size, 3, 3)
             n += 1
@@ -600,11 +638,13 @@ if __name__ == '__main__':
             buf_v[j:j + len(v)] = v_sm
             j += len(v_sm)
 
+        # if (buf_y[9][i:j] < -100).sum() > 0:
+        #     breakpoint()
         i = j
     normalize(buf_x)
     for arr, name in zip(buf_x, ("ball", "boost", "blue", "orange")):
-        np.save(rf"{path}\x_{name}-{n}", arr)
+        np.save(rf"{path}\x_{name}-{n}", arr[:i])
     for arr, name in zip(buf_y, ("score", "next_touch", "collect", "demo",
                                  "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake")):
-        np.save(rf"{path}\y_{name}-{n}", arr)
+        np.save(rf"{path}\y_{name}-{n}", arr[:i])
     print("Buffer:", n)

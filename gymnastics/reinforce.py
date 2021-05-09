@@ -25,7 +25,7 @@ class EARLObsBuilder(ObsBuilder):
     def build_obs(self, player: PlayerData, state: GameState, previous_action: np.ndarray) -> Any:
         if self.first_call_flag:
             self.first_call_flag = False
-            return np.zeros((1 + 34 + 6, 21))
+            return np.zeros((1 + 34 + 6, 21))  # Make Aech happy
         if state == self.last_state:
             return self.last_res
         n_blue = n_orange = 0
@@ -68,7 +68,7 @@ class EARLObsBuilder(ObsBuilder):
             x_team[0, i, 13:16] = player.car_data.linear_velocity
             x_team[0, i, 16:19] = player.car_data.angular_velocity
             x_team[0, i, 19] = player.boost_amount
-            x_team[0, i, 20] = player.is_alive
+            x_team[0, i, 20] = player.is_demoed
 
         x_data = [x_ball, x_boost, x_blue, x_orange]
 
@@ -84,12 +84,27 @@ if __name__ == '__main__':
 
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-    mdl = torch.load("../out/models/EARLActorCritic_trained.model.ep12")
+    mdl = torch.load("../out/models/EARLActorCritic(EARL(n_dims=256,n_layers=8,n_heads=8))_trained.model.ep7")
+    # mdl = torch.load("../out/models/EARLActorCritic_trained.model.ep12")
     mdl.eval()
 
-    env = rlgym.make("DuelSelf", obs_builder=EARLObsBuilder(), game_speed=1, tick_skip=4)
-    obs, reward, done, info = env.step(np.zeros((8,)))
+    env = rlgym.make("StandardSelf", obs_builder=EARLObsBuilder(), game_speed=1, tick_skip=4)
+    env.reset()
+    obs, reward, done, info = env.step(np.zeros((6, 8)))
     while True:
         pred = mdl(*(torch.from_numpy(v).float() for v in obs[0]))
-        actions = EARLActorCritic.convert_actor_result(pred[1], stochastic=True)
+        print(torch.sigmoid(pred[0]).item())
+        actions_by_team = EARLActorCritic.convert_actor_result(pred[1], stochastic=True)
+        actions = np.zeros((6, 8))
+        i = 0
+        n_blue = sum(player.team_num == BLUE_TEAM for player in info["state"].players)
+        o = b = 0
+        for player in info["state"].players:
+            if player.team_num == BLUE_TEAM:
+                actions[i, :] = actions_by_team[b, :]
+                b += 1
+            elif player.team_num == ORANGE_TEAM:
+                actions[i, :] = actions_by_team[n_blue + o, :]
+                o += 1
+            i += 1
         obs, reward, done, info = env.step(actions)

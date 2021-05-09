@@ -15,12 +15,20 @@ class EARL(nn.Module):
         nn.init.normal_(self.emb)
         self.initial_dense = nn.Linear(self.N_PARAMETERS, n_dims)
         self.final_dense = nn.Linear(n_dims, n_dims)
-        encoder_layer = nn.TransformerEncoderLayer(n_dims, n_heads, n_dims)
+        encoder_layer = nn.TransformerEncoderLayer(n_dims, n_heads, n_dims, dropout=0)
         encoder_norm = nn.LayerNorm(n_dims)
 
         self.blocks = nn.TransformerEncoder(
             encoder_layer, n_layers, encoder_norm
         )
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        r"""Initiate parameters in the transformer model. From PyTorch's transformer implementation."""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
 
     def forward(self, balls, boosts, blue, orange):
         cls = self.emb.repeat(balls.shape[0], 1, 1)
@@ -45,3 +53,6 @@ class EARL(nn.Module):
         orange_emb = entities.narrow(1, n_balls + n_boosts + n_blue, n_orange)
 
         return cls_emb, ball_emb, boost_emb, blue_emb, orange_emb
+
+    def __repr__(self):
+        return f"EARL(n_dims={self.n_dims},n_layers={self.n_layers},n_heads={self.n_heads})"
