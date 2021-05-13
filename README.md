@@ -11,7 +11,7 @@ Provided models:
 - `EARLRankModel`
   Rank prediction of players from replay data.
   
-![Actor Critic Model](EARLActorCritic.svg?raw=true)
+![Actor Critic](EARLActorCritic.svg?raw=true)
 
 
 ### Installation
