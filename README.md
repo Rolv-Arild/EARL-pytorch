@@ -10,6 +10,9 @@ Provided models:
   Action prediction for playing the game, or reinforcement learning through [RLGym](https://github.com/lucas-emery/rocket-league-gym)
 - `EARLRankModel`
   Rank prediction of players from replay data.
+  
+![Actor Critic Model](EARLActorCritic.svg?raw=true)
+
 
 ### Installation
 ```
