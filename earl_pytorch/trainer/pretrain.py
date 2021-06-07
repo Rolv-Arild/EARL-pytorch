@@ -1,38 +1,28 @@
+import time
 from typing import Optional
 
+import h5py
 import numpy as np
+import pandas as pd
+import pytorch_lightning
+import sklearn.metrics
 import torch
 import torch.nn as nn
 import tqdm
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
 from sklearn.metrics import confusion_matrix, plot_confusion_matrix, ConfusionMatrixDisplay
 from torch.optim import Adam
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split, BufferedShuffleDataset
 import contextlib
 from earl_pytorch import EARL
 from earl_pytorch.dataset.dataset import get_dataset
+import pytorch_lightning as pl
+import torchmetrics
 
 from earl_pytorch.dataset.create_dataset import ReplayCollectionDataset
 from earl_pytorch.dataset.fast_tensor_data_loader import FastTensorDataLoader
 from earl_pytorch.model import EARLReplayModel, EARLActorCritic
-
-
-def plot_grad_flow(named_parameters):
-    import matplotlib.pyplot as plt
-    ave_grads = []
-    layers = []
-    for n, p in named_parameters:
-        if p.requires_grad and ("bias" not in n) and p.grad is not None:
-            layers.append(n)
-            ave_grads.append(p.grad.abs().mean())
-    plt.plot(ave_grads, alpha=0.3, color="b")
-    plt.hlines(0, 0, len(ave_grads) + 1, linewidth=1, color="k")
-    plt.xticks(range(0, len(ave_grads), 1), layers, rotation="vertical")
-    plt.xlim(xmin=0, xmax=len(ave_grads))
-    plt.xlabel("Layers")
-    plt.ylabel("average gradient")
-    plt.title("Gradient flow")
-    plt.grid(True)
-    plt.show()
 
 
 class EARLTrainer:
@@ -154,7 +144,7 @@ class EARLTrainer:
 
                         # 2-2. Loss of predicting next touch
                         touch_loss = self.cel(next_touch, y[1])
-                        n_players = x[2].shape[1] + x[3].shape[1]
+                        n_players = x[2].shape[1]
                         update_losses(m, "touch", next_touch, y[1], touch_loss, n_players)
 
                         # 2-3. Loss of predicting next boost collect
@@ -249,58 +239,205 @@ class EARLTrainer:
 def dataset_iterator(folder, lim, bs=128):
     import gc
     for n in range(lim):
-        # ds = ReplayCollectionDataset(folder, lim)
+        ds = ReplayCollectionDataset(folder, lim)
         is_train = n > 1
         print(n)
-        yield FastTensorDataLoader(folder, n, bs, shuffle=True)
-        # yield DataLoader(ds, batch_size=bs, num_workers=0, shuffle=True, drop_last=is_train)
-        # del ds
+        # yield FastTensorDataLoader(folder, n, bs, shuffle=True)
+        yield DataLoader(ds, batch_size=bs, num_workers=0, shuffle=True, drop_last=is_train, pin_memory=True)
+        del ds
         gc.collect()
 
 
+class LitEARLTrainer(pl.LightningModule):
+    def __init__(self, model, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model = model
+        self.lr = 3e-4
+
+        if isinstance(model, EARLReplayModel):
+            self.outputs = {
+                "score": {
+                    "weight": 0.3,
+                    "loss_func": nn.CrossEntropyLoss(),
+                    "metrics": {
+                        "acc": torchmetrics.Accuracy(num_classes=2),
+                        "conf": torchmetrics.ConfusionMatrix(num_classes=2)
+                    }
+                },
+                "touch": {
+                    "weight": 0.5,
+                    "loss_func": nn.CrossEntropyLoss(),
+                    "metrics": {
+                        "acc": torchmetrics.Accuracy(num_classes=6),
+                        "conf": torchmetrics.ConfusionMatrix(num_classes=6)
+                    }
+                },
+                "boost": {
+                    "weight": 0.1,
+                    "loss_func": nn.CrossEntropyLoss(),
+                    "metrics": {
+                        "acc": torchmetrics.Accuracy(num_classes=34),
+                        "conf": torchmetrics.ConfusionMatrix(num_classes=34)
+                    }
+                },
+                "demo": {
+                    "weight": 0.1,
+                    "loss_func": nn.CrossEntropyLoss(),
+                    "metrics": {
+                        "acc": torchmetrics.Accuracy(num_classes=6),
+                        "conf": torchmetrics.ConfusionMatrix(num_classes=6)
+                    }
+                }
+            }
+        elif isinstance(model, EARLActorCritic):
+            self.outputs = {
+                "value": {
+                    "weight": 1 / 9,
+                    "loss_func": nn.BCEWithLogitsLoss(),
+                    "metrics": {
+                        "acc": torchmetrics.Accuracy(num_classes=2),
+                        "conf": torchmetrics.ConfusionMatrix(num_classes=2)
+                    }
+                }
+            }
+            self.outputs.update({
+                {
+                    name: {
+                        "weight": 1 / 9,
+                        "loss_func": nn.CrossEntropyLoss(),
+                        "metrics": {
+                            "acc": torchmetrics.Accuracy(num_classes=3),
+                            "conf": torchmetrics.ConfusionMatrix(num_classes=3)
+                        }
+                    }
+                }
+                for name in ("throttle", "steer", "pitch", "yaw", "roll")
+            })
+            self.outputs.update({
+                {
+                    name: {
+                        "weight": 1 / 9,
+                        "loss_func": nn.CrossEntropyLoss(),
+                        "metrics": {
+                            "acc": torchmetrics.Accuracy(num_classes=2),
+                            "conf": torchmetrics.ConfusionMatrix(num_classes=2)
+                        }
+                    }
+                }
+                for name in ("jump", "boost", "handbrake")
+            })
+
+    def forward(self, *x):
+        return self.model(*x)
+
+    def on_post_move_to_device(self):
+        for info in self.outputs.values():
+            info["loss_func"].to(self.device)
+            for metric in info["metrics"].values():
+                metric.to(self.device)
+
+    def configure_optimizers(self):
+        return Adam(self.model.parameters(), lr=self.lr)
+
+    def _base_step(self, batch, batch_idx, mode):
+        x, y = batch
+        x = [v.float() for v in x]
+        y = [v.long() for v in y]
+
+        y_hat = self.model(*x)
+
+        total_loss = 0
+        for name, y_pred, y_true in zip(self.outputs, y_hat, y):
+            info = self.outputs[name]
+            loss = info["loss_func"](y_pred, y_true)
+            self.log(f"{mode}_{name}_loss", loss, on_epoch=True)
+            for metric in info["metrics"].values():
+                metric(y_pred.argmax(1)[y_true >= 0], y_true[y_true >= 0])
+            total_loss += info["weight"] * loss
+        self.log(f"{mode}_loss", total_loss)
+
+        return total_loss
+
+    def _base_epoch_end(self, mode):
+        for name, info in self.outputs.items():
+            for metric_name, metric in info["metrics"].items():
+                res = metric.compute()
+                if res.numel() > 1:
+                    tensorboard = self.logger.experiment
+                    df_cm = pd.DataFrame(res.cpu().numpy())
+                    cmd = ConfusionMatrixDisplay(df_cm).plot(include_values=False)
+                    tensorboard.add_figure(f"{mode}_{name}_{metric_name}_epoch", cmd.figure_, self.current_epoch)
+                else:
+                    self.log(f"{mode}_{name}_{metric_name}_epoch", res)
+                metric.reset()
+
+    def training_step(self, train_batch, batch_idx):
+        return self._base_step(train_batch, batch_idx, "train")
+
+    def training_epoch_end(self, outputs):
+        self._base_epoch_end("train")
+
+    def validation_epoch_end(self, outputs):
+        self._base_epoch_end("val")
+
+    def test_epoch_end(self, outputs):
+        self._base_epoch_end("test")
+
+    def validation_step(self, train_batch, batch_idx):
+        return self._base_step(train_batch, batch_idx, "val")
+
+    def test_step(self, train_batch, batch_idx):
+        return self._base_step(train_batch, batch_idx, "test")
+
+
+class RLCSXDataset(pytorch_lightning.LightningDataModule):
+    def __init__(self, fname, batch_size=128):
+        super().__init__()
+        self.h5_dataset = h5py.File(fname, "r")
+        self.batch_size = batch_size
+
+    def setup(self, stage: Optional[str] = None):
+        # if stage == "fit":
+        self.train = (self.h5_dataset["train"])
+        # elif stage == "validate":
+        self.val = (self.h5_dataset["val"])
+        # elif stage == "test":
+        self.test = (self.h5_dataset["test"])
+
+    def train_dataloader(self):
+        rcd = ReplayCollectionDataset(self.train)
+        return DataLoader(rcd, batch_size=None, pin_memory=True)
+
+    def val_dataloader(self):
+        rcd = ReplayCollectionDataset(self.val)
+        # bsd = BufferedShuffleDataset(rcd, 65536)
+        return DataLoader(rcd, batch_size=None, pin_memory=True)
+
+    def test_dataloader(self):
+        rcd = ReplayCollectionDataset(self.test)
+        return DataLoader(rcd, batch_size=None, pin_memory=True)
+
+
 if __name__ == '__main__':
-    # import os
-    # os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-    # rp_ds = ReplayDatasetFull(None, r"E:\processed", name="data", limit=8192)  # r"E:\replays\ranked-standard"
-    # rp_ds = ReplayDatasetFull(None, r"E:\processed", name="data", limit=8192)  # r"E:\replays\ranked-standard"
-    # mdl = EARLActorCritic(EARL())
-    # mdl = torch.load("../../out/models/earl_trained.model.ep2")
-    # scr = torch.jit.script(mdl)
-    models = [
-        EARLReplayModel(EARL(256, 8, 8)),
-        EARLActorCritic(EARL(256, 8, 8))
-        # EARLReplayModel(EARL(d, l, h))
-        # for d in (128, 192, 256,)
-        # for l in (2, 4, 8,)
-        # for h in (2, 4, 8,)
-        # torch.load("../../out/models/EARLReplayModel(EARL(n_dims=128,n_layers=4,n_heads=4))_trained.model.ep12"),
-        # torch.load("../../out/models/EARLActorCritic(EARL(n_dims=128,n_layers=4,n_heads=4))_trained.model.ep12"),
-    ]
-    et = EARLTrainer(models, lr=3e-4,
-                     log_freq=1024, with_cuda=True)
-    best_losses = [1e10] * len(models)
-    best_paths = [None] * len(models)
-    pat = 0
-    for e in range(100):
-        datasets = dataset_iterator(r"D:\rokutleg\datasets\rlcsx", 12, 512)
-        next(datasets)  # Skip test set
-        et.val_data = next(datasets)
-        for ds in datasets:
-            et.train_data = None
-            et.train_data = ds
-            train_loss = et.train(e)
+    # time.sleep(60 * 90)
+    pytorch_lightning.seed_everything(123)
+    # models = [
+    #     EARLReplayModel(EARL(256, 8, 8)),
+    #     EARLActorCritic(EARL(256, 8, 8))
+    # ]
+    model = LitEARLTrainer(EARLReplayModel(EARL(256, 8, 8)))
+    logger = TensorBoardLogger(save_dir="../../out/logs", name="EARLReplayModel")
+    trainer = pytorch_lightning.Trainer(logger, auto_lr_find=True, gpus=1, max_epochs=100, callbacks=[
+        ModelCheckpoint("../../out/models", "EARLReplayModel-{epoch}")])
 
-        val_losses = et.validate(e)
-        for i, val_loss in enumerate(val_losses):
-            if val_loss < best_losses[i]:
-                best_losses[i] = val_loss
-                print(f"New best loss ({i}): {best_losses[i]}")
-                best_paths[i] = et.save(e, i)
-            else:
-                pat += 1
-                if pat >= 10:
-                    break
+    # datasets = dataset_iterator(r"D:\rokutleg\datasets\rlcsx", 12, 512)
+    dataset = RLCSXDataset(r"D:\rokutleg\datasets\rlcsx.hdf5", 512)
 
-    et.models = [torch.load(pth) for pth in best_paths]
-    et.test_data = next(dataset_iterator(r"D:\rokutleg\datasets\rlcsx", 12, 512))
-    et.test(-1)
+    # Run learning rate finder
+    lr_finder = trainer.tuner.lr_find(model, dataset, max_lr=5e-2)
+    fig = lr_finder.plot(suggest=True)
+    fig.show()
+    new_lr = lr_finder.suggestion()
+    model.lr = new_lr
+
+    trainer.fit(model, datamodule=dataset)
