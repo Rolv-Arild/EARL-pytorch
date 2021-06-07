@@ -22,8 +22,11 @@ class DotProductPrediction(nn.Module):
 
 
 class EARLReplayModel(nn.Module):
-    def __init__(self, earl: EARL):
+    def __init__(self, earl: EARL = None):
         super().__init__()
+        if earl is None:
+            earl = EARL()
+
         self.earl = earl
 
         self.score = nn.Linear(earl.n_dims, 2)
@@ -32,7 +35,9 @@ class EARLReplayModel(nn.Module):
         self.demo = DotProductPrediction(earl.n_dims, earl.n_dims // earl.n_heads)
 
     def forward(self, *x):
-        cls, ball, boosts, blue, orange = self.earl(*x)
-        players = torch.cat((blue, orange), dim=-2)
+        cls, ball, boosts, players = self.earl(*x)
         return self.score(cls), self.next_touch(players, ball), self.boost_collect(boosts, players), self.demo(players,
                                                                                                                players)
+
+    def __repr__(self):
+        return f"EARLReplayModel({repr(self.earl)})"

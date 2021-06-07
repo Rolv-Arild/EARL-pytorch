@@ -12,6 +12,5 @@ class EARLRankModel(nn.Module):
         self.rank = nn.Linear(earl.n_dims, 22)
 
     def forward(self, *x):
-        cls, ball, boosts, blue, orange = self.earl(*x)
-        players = torch.cat((blue, orange), dim=-2)
+        cls, ball, boosts, players = self.earl(*x)
         return self.rank(players)

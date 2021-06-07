@@ -23,24 +23,25 @@ class EARLObsBuilder(ObsBuilder):
         pass
 
     def build_obs(self, player: PlayerData, state: GameState, previous_action: np.ndarray) -> Any:
-        if self.first_call_flag:
-            self.first_call_flag = False
-            return np.zeros((1 + 34 + 6, 21))
-        if state == self.last_state:
-            return self.last_res
-        n_blue = n_orange = 0
-        for p in state.players:
-            if p.team_num == BLUE_TEAM:
-                n_blue += 1
-            elif p.team_num == ORANGE_TEAM:
-                n_orange += 1
-        x_ball, x_boost, x_blue, x_orange = get_base_features(1, n_blue, n_orange, include_y=False)
+        # if self.first_call_flag:
+        #     self.first_call_flag = False
+        #     self.last_res = np.zeros((1 + 34 + 6, 23))
+        #     return self.last_res  # Make Aech happy
+        # if state != self.last_state:
+        x_ball, x_boost, x_players = get_base_features(1, len(state.players), include_y=False, n_features=23)
 
-        x_ball[0, :, 4:7] = state.ball.position
-        x_ball[0, :, 13:16] = state.ball.linear_velocity
-        x_ball[0, :, 16:19] = state.ball.angular_velocity
+        if player.team_num == ORANGE_TEAM:
+            boost_pads = state.inverted_boost_pads
+            ball = state.inverted_ball
+        else:
+            boost_pads = state.boost_pads
+            ball = state.ball
 
-        for i, (is_active, (x, y, z)) in enumerate(zip(state.boost_pads, boost_locations)):
+        x_ball[0, :, 4:7] = ball.position
+        x_ball[0, :, 13:16] = ball.linear_velocity
+        x_ball[0, :, 16:19] = ball.angular_velocity
+
+        for i, (is_active, (x, y, z)) in enumerate(zip(boost_pads, boost_locations)):
             x_boost[0, i, 4:7] = x, y, z
             if z > 72:
                 x_boost[0, i, 19] = 100.
@@ -48,31 +49,39 @@ class EARLObsBuilder(ObsBuilder):
                 x_boost[0, i, 19] = 12.
             x_boost[0, i, 20] = 1 - is_active
 
-        b = o = 0
-        for player in state.players:
-            if player.team_num == BLUE_TEAM:
-                x_team = x_blue
-                i = b
-                b += 1
-            elif player.team_num == ORANGE_TEAM:
-                x_team = x_orange
-                i = o
-                o += 1
+        for i, player2 in enumerate(state.players):
+            if player2.team_num == player.team_num:
+                x_players[0, i, 2] = 1
             else:
-                print("Invalid team:", player.team_num)
-                continue
+                x_players[0, i, 3] = 1
 
-            x_team[0, i, 4:7] = player.car_data.position
-            x_team[0, i, 7:10] = player.car_data.forward()
-            x_team[0, i, 10:13] = player.car_data.up()
-            x_team[0, i, 13:16] = player.car_data.linear_velocity
-            x_team[0, i, 16:19] = player.car_data.angular_velocity
-            x_team[0, i, 19] = player.boost_amount
-            x_team[0, i, 20] = player.is_alive
+            if player.team_num == ORANGE_TEAM:
+                car_data = player2.inverted_car_data
+            else:
+                car_data = player2.car_data
 
-        x_data = [x_ball, x_boost, x_blue, x_orange]
+            x_players[0, i, 4:7] = car_data.position
+            x_players[0, i, 7:10] = car_data.forward()
+            x_players[0, i, 10:13] = car_data.up()
+            x_players[0, i, 13:16] = car_data.linear_velocity
+            x_players[0, i, 16:19] = car_data.angular_velocity
+            x_players[0, i, 19] = player2.boost_amount * 100
+            x_players[0, i, 20] = player2.is_demoed
+            x_players[0, i, 21] = player2.on_ground
+            x_players[0, i, 22] = player2.has_flip
+
+        p_index = state.players.index(player)
+        x_players[0, [0, p_index], :] = x_players[0, [p_index, 0], :]
+
+        x_data = [x_ball, x_boost, x_players]
 
         normalize(x_data)
+
+        x_data = np.concatenate(x_data[::-1], axis=1).squeeze(axis=0)
+
+        # Handle rare memory corruption
+        x_data = np.nan_to_num(x_data.astype(np.float32))
+        x_data[np.abs(x_data) > 10] = 0
 
         self.last_state = state
         self.last_res = x_data
@@ -84,12 +93,27 @@ if __name__ == '__main__':
 
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-    mdl = torch.load("../out/models/EARLActorCritic_trained.model.ep12")
+    mdl = torch.load("../out/models/EARLActorCritic(EARL(n_dims=256,n_layers=8,n_heads=8))_trained.model.ep7")
+    # mdl = torch.load("../out/models/EARLActorCritic_trained.model.ep12")
     mdl.eval()
 
-    env = rlgym.make("DuelSelf", obs_builder=EARLObsBuilder(), game_speed=1, tick_skip=4)
-    obs, reward, done, info = env.step(np.zeros((8,)))
+    env = rlgym.make("StandardSelf", obs_builder=EARLObsBuilder(), game_speed=1, tick_skip=4)
+    env.reset()
+    obs, reward, done, info = env.step(np.zeros((6, 8)))
     while True:
         pred = mdl(*(torch.from_numpy(v).float() for v in obs[0]))
-        actions = EARLActorCritic.convert_actor_result(pred[1], stochastic=True)
+        print(torch.sigmoid(pred[0]).item())
+        actions_by_team = EARLActorCritic.convert_actor_result(pred[1], stochastic=True)
+        actions = np.zeros((6, 8))
+        i = 0
+        n_blue = sum(player.team_num == BLUE_TEAM for player in info["state"].players)
+        o = b = 0
+        for player in info["state"].players:
+            if player.team_num == BLUE_TEAM:
+                actions[i, :] = actions_by_team[b, :]
+                b += 1
+            elif player.team_num == ORANGE_TEAM:
+                actions[i, :] = actions_by_team[n_blue + o, :]
+                o += 1
+            i += 1
         obs, reward, done, info = env.step(actions)

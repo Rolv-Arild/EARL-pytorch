@@ -1,11 +1,16 @@
+import itertools
 import logging
 import os
 import pickle
+from typing import Iterator
 
+import h5py
 import numpy as np
+import pandas as pd
+import pytorch_lightning
 import torch
 from torch.utils.data import Dataset
-from torch.utils.data.dataset import T_co
+from torch.utils.data.dataset import T_co, IterableDataset
 from tqdm import tqdm
 
 from earl_pytorch.util.util import boost_locations, rotator_to_matrix
@@ -28,6 +33,11 @@ LABELS = [
 BALL_COLS = [4, 5, 6, 13, 14, 15, 16, 17, 18]
 BOOST_COLS = [4, 5, 6, 19, 20]
 PLAYER_COLS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+
+X_DATASET_NAMES = ("balls", "boosts", "players")
+Y_DATASET_NAMES = ("next_goal", "next_touch", "next_boost", "next_demo",
+                   "control_throttle", "control_steer", "control_pitch", "control_yaw", "control_roll",
+                   "control_jump", "control_boost", "control_handbrake")
 
 
 def iterate_replays(bc_api, replay_ids=None, replay_folder=None, cache_folder=None):
@@ -68,7 +78,7 @@ def iterate_replays(bc_api, replay_ids=None, replay_folder=None, cache_folder=No
             yield convert_dfs(processed)
 
 
-def replay_to_dfs(replay, frame_mode=15):
+def replay_to_dfs(replay, skip_ties=True, skip_kickoffs=True):
     import pandas as pd
     import carball as cb
 
@@ -97,53 +107,54 @@ def replay_to_dfs(replay, frame_mode=15):
     boost_grabs = pd.DataFrame(columns=["frame", "boost_id", "player"])
 
     player_index = {}
-    player_df = pd.DataFrame(columns=["identifier", "online_id", "name"])
+    player_df = pd.DataFrame(columns=["color", "online_id", "name"])
+    i = 0
     for color, team in ("blue", blue_team), ("orange", orange_team):
-        for n, player in enumerate(team.players):
-            identifier = f"{color}_{n}"
-            player_index[player.online_id] = identifier
-            frames[f"{identifier}/pos_x"] = player.data["pos_x"].fillna(0.)
-            frames[f"{identifier}/pos_y"] = player.data["pos_y"].fillna(0.)
-            frames[f"{identifier}/pos_z"] = player.data["pos_z"].fillna(0.)
+        for player in team.players:
+            player_index[player.online_id] = i
+            frames[f"{i}/pos_x"] = player.data["pos_x"].fillna(0.)
+            frames[f"{i}/pos_y"] = player.data["pos_y"].fillna(0.)
+            frames[f"{i}/pos_z"] = player.data["pos_z"].fillna(0.)
 
             yaw = player.data["rot_y"].fillna(0.)
             pitch = player.data["rot_x"].fillna(0.)
             roll = player.data["rot_z"].fillna(0.)
             forward, up = rotator_to_matrix(yaw, pitch, roll)
 
-            frames[f"{identifier}/forward_x"] = forward[0]
-            frames[f"{identifier}/forward_y"] = forward[1]
-            frames[f"{identifier}/forward_z"] = forward[2]
+            frames[f"{i}/forward_x"] = forward[0]
+            frames[f"{i}/forward_y"] = forward[1]
+            frames[f"{i}/forward_z"] = forward[2]
 
-            frames[f"{identifier}/up_x"] = up[0]
-            frames[f"{identifier}/up_y"] = up[1]
-            frames[f"{identifier}/up_z"] = up[2]
+            frames[f"{i}/up_x"] = up[0]
+            frames[f"{i}/up_y"] = up[1]
+            frames[f"{i}/up_z"] = up[2]
 
-            frames[f"{identifier}/vel_x"] = player.data["vel_x"].fillna(0.) / 10
-            frames[f"{identifier}/vel_y"] = player.data["vel_y"].fillna(0.) / 10
-            frames[f"{identifier}/vel_z"] = player.data["vel_z"].fillna(0.) / 10
+            frames[f"{i}/vel_x"] = player.data["vel_x"].fillna(0.) / 10
+            frames[f"{i}/vel_y"] = player.data["vel_y"].fillna(0.) / 10
+            frames[f"{i}/vel_z"] = player.data["vel_z"].fillna(0.) / 10
 
-            frames[f"{identifier}/ang_vel_x"] = player.data["ang_vel_x"].fillna(0.) / 1000
-            frames[f"{identifier}/ang_vel_y"] = player.data["ang_vel_y"].fillna(0.) / 1000
-            frames[f"{identifier}/ang_vel_z"] = player.data["ang_vel_z"].fillna(0.) / 1000
+            frames[f"{i}/ang_vel_x"] = player.data["ang_vel_x"].fillna(0.) / 1000
+            frames[f"{i}/ang_vel_y"] = player.data["ang_vel_y"].fillna(0.) / 1000
+            frames[f"{i}/ang_vel_z"] = player.data["ang_vel_z"].fillna(0.) / 1000
 
-            frames[f"{identifier}/boost_amount"] = player.data["boost"].fillna(0.) / 2.55
+            frames[f"{i}/boost_amount"] = player.data["boost"].fillna(0.) / 2.55
 
             for col in player.controls.columns:
-                frames[f"{identifier}/{col}_control"] = player.controls[col].astype(float)
+                frames[f"{i}/{col}_control"] = player.controls[col].astype(float)
 
             boost_pickups = player.data["boost"].diff() > 0
             for frame, row in player.data[boost_pickups].iterrows():
                 xyz = (row["pos_x"], row["pos_y"], row["pos_z"])
                 # TODO use boost ID instead
                 closest_boost = min(range(len(boost_locations)),
-                                    key=lambda i: sum((a - b) ** 2 for a, b in zip(xyz, boost_locations[i])))
-                boost_grabs.loc[len(boost_grabs)] = [frame, closest_boost, identifier]
+                                    key=lambda j: sum((a - b) ** 2 for a, b in zip(xyz, boost_locations[j])))
+                boost_grabs.loc[len(boost_grabs)] = [frame, closest_boost, i]
 
-            player_df.loc[len(player_df)] = [identifier, player.online_id, player.name]
+            player_df.loc[len(player_df)] = [color, player.online_id, player.name]
+            i += 1
 
     rallies = pd.DataFrame(columns=["start_frame", "end_frame", "team"])
-    for kf1, kf2 in zip(replay.game.kickoff_frames, replay.game.kickoff_frames[1:] + [float("inf")]):
+    for kf1, kf2 in zip(replay.game.kickoff_frames, replay.game.kickoff_frames[1:] + [replay.game.frames.index[-1]]):
         for goal in replay.game.goals:
             if kf1 < goal.frame_number < kf2:
                 rallies.loc[len(rallies)] = [kf1, goal.frame_number, ["blue", "orange"][goal.player_team]]
@@ -164,31 +175,39 @@ def replay_to_dfs(replay, frame_mode=15):
     for touch in replay.protobuf_game.game_stats.hits:
         touches.loc[len(touches)] = [touch.frame_number, player_index[touch.player_id.id]]
 
-    goal_rallies = rallies[rallies["team"].notna()]
-    frames = frames.loc[
-        np.r_[tuple(slice(row["start_frame"], row["end_frame"]) for _, row in goal_rallies.iterrows())]]
-    if isinstance(frame_mode, int):
-        frames = frames.iloc[np.random.randint(0, frame_mode)::frame_mode]
-    else:
-        frames = frames.sample(frac=frame_mode)
+    if skip_ties:
+        goal_rallies = rallies[rallies["team"].notna()]
+        frames = frames.loc[
+            np.r_[tuple(slice(row["start_frame"], row["end_frame"]) for _, row in goal_rallies.iterrows())]]
+    elif skip_kickoffs:
+        goal_rallies = rallies
+        frames = frames.loc[
+            np.r_[tuple(slice(row["start_frame"], row["end_frame"]) for _, row in goal_rallies.iterrows())]]
+
+    # if isinstance(frame_mode, int):
+    #     frames = frames.iloc[np.random.randint(0, frame_mode)::frame_mode]
+    # else:
+    #     frames = frames.sample(frac=frame_mode)
 
     return {"frames": frames, "rallies": rallies, "touches": touches, "boost_grabs": boost_grabs, "demos": demos,
             "players": player_df}
 
 
-def convert_dfs(dfs, tensors=False):
+def convert_dfs(dfs, tensors=False, frame_mode=15):
     frames, rallies, touches, boost_grabs, demos, player_df = \
         (dfs[k] for k in ("frames", "rallies", "touches", "boost_grabs", "demos", "players"))
 
-    n_blue = (player_df["identifier"].str.contains("blue")).sum()
-    n_orange = (player_df["identifier"].str.contains("orange")).sum()
+    control_cols = frames.filter(regex="_control$").columns
+    frames[control_cols] = frames[control_cols].shift()
+    frames = frames.iloc[np.random.randint(0, frame_mode)::frame_mode]
+
     if tensors:
         convert_fn = lambda x: torch.from_numpy(x).to(torch.float)
     else:
         convert_fn = lambda x: x
 
-    x, y = get_base_features(len(frames), n_blue, n_orange, tensors=tensors)
-    x_ball, x_boost, x_blue, x_orange = x
+    x, y = get_base_features(len(frames), len(player_df), tensors=tensors)
+    x_ball, x_boost, x_players = x
     (y_score, y_next_touch, y_collect, y_demo,
      y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake) = y
 
@@ -198,29 +217,27 @@ def convert_dfs(dfs, tensors=False):
 
     bins = np.array([-50, -0.1, 0.1])  # np.arange(0.25 / 2 - 1, 1, 0.25)
 
-    for identifier in player_df["identifier"]:
-        color, n = identifier.split("_")
-        n = int(n)
-        i = n + n_blue * (color == "orange")
+    for i, row in player_df.iterrows():
+        color = row["color"]
         if color == "blue":
-            team = x_blue
+            x_players[:, i, 2] = 1
         elif color == "orange":
-            team = x_orange
+            x_players[:, i, 3] = 1
         else:
             raise ValueError(color)
 
-        team[:, n, PLAYER_COLS] = \
-            convert_fn(frames[[f"{identifier}/{col}" for col in
+        x_players[:, i, PLAYER_COLS] = \
+            convert_fn(frames[[f"{i}/{col}" for col in
                                map(FEATURES.__getitem__, PLAYER_COLS)]].values)
 
-        throttle = np.digitize(frames[f"{identifier}/throttle_control"].fillna(-100).values, bins) - 1
-        steer = np.digitize(frames[f"{identifier}/steer_control"].fillna(-100).values, bins) - 1
-        pitch = np.digitize(frames[f"{identifier}/pitch_control"].fillna(-100).values, bins) - 1
-        yaw = np.digitize(frames[f"{identifier}/yaw_control"].fillna(-100).values, bins) - 1
-        roll = np.digitize(frames[f"{identifier}/roll_control"].fillna(-100).values, bins) - 1
-        jump = frames[f"{identifier}/jump_control"].fillna(-100).astype(int).values
-        boost = frames[f"{identifier}/boost_control"].fillna(-100).astype(int).values
-        handbrake = frames[f"{identifier}/handbrake_control"].fillna(-100).astype(int).values
+        throttle = np.digitize(frames[f"{i}/throttle_control"].fillna(-100).values, bins) - 1
+        steer = np.digitize(frames[f"{i}/steer_control"].fillna(-100).values, bins) - 1
+        pitch = np.digitize(frames[f"{i}/pitch_control"].fillna(-100).values, bins) - 1
+        yaw = np.digitize(frames[f"{i}/yaw_control"].fillna(-100).values, bins) - 1
+        roll = np.digitize(frames[f"{i}/roll_control"].fillna(-100).values, bins) - 1
+        jump = frames[f"{i}/jump_control"].fillna(-100).astype(int).values
+        boost = frames[f"{i}/boost_control"].fillna(-100).astype(int).values
+        handbrake = frames[f"{i}/handbrake_control"].fillna(-100).astype(int).values
 
         throttle[throttle < 0] = -100
         steer[steer < 0] = -100
@@ -267,20 +284,14 @@ def convert_dfs(dfs, tensors=False):
         for _, touch in rally_touches.iterrows():
             frame = touch["frame"]
             player = touch["player"]
-            color, i = player.split("_")
-            i = int(i) + n_blue * (color == "orange")
 
             indices = (last_frame <= frames.index) & (frames.index < frame)
-            y_next_touch[indices, 0] = i
+            y_next_touch[indices, 0] = player
             last_frame = frame
 
-        for identifier in player_df["identifier"]:
-            player_demos = rally_demos[rally_demos["attacker"] == identifier]
-            player_collects = rally_collects[rally_collects["player"] == identifier]
-
-            color, n = identifier.split("_")
-            n = int(n)
-            i = n + n_blue * (color == "orange")
+        for i, row in player_df.iterrows():
+            player_demos = rally_demos[rally_demos["attacker"] == i]
+            player_collects = rally_collects[rally_collects["player"] == i]
 
             last_frame = rally["start_frame"]
             for _, boost_grab in player_collects.iterrows():
@@ -303,22 +314,15 @@ def convert_dfs(dfs, tensors=False):
             for _, demo in player_demos.iterrows():
                 frame = demo["frame"]
 
-                victim = demo["victim"]
-                v_color, j = victim.split("_")
-                j = int(j)
+                j = demo["victim"]
 
                 demoed_indices = (frames.index - frame >= 0) & (frames.index - frame < 30 * 3)
-                if v_color == "blue":
-                    x_blue[demoed_indices, j, 20] = 1
-                elif v_color == "orange":
-                    x_orange[demoed_indices, j, 20] = 1
-                else:
-                    print("Team:", v_color)
+                x_players[demoed_indices, j, 20] = 1
 
                 indices = (last_frame <= frames.index) & (frames.index < frame)
-                y_demo[indices, i] = j + n_blue * (v_color == "orange")
+                y_demo[indices, i] = j
                 last_frame = frame
-    x_data = [x_ball, x_boost, x_blue, x_orange]
+    x_data = [x_ball, x_boost, x_players]
     y_data = [y_score, y_next_touch, y_collect, y_demo,
               y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake]
 
@@ -328,8 +332,10 @@ def convert_dfs(dfs, tensors=False):
     return x_data, y_data
 
 
-def get_base_features(size, n_blue, n_orange, n_balls=1, n_boosts=34, include_y=True, tensors=False):
-    n_features = len(FEATURES)
+def get_base_features(size, n_players, n_balls=1, n_boosts=34, include_y=True, tensors=False, n_features=None):
+    if n_features is None:
+        n_features = len(FEATURES)
+
     if tensors:
         initializer = torch
     else:
@@ -337,32 +343,29 @@ def get_base_features(size, n_blue, n_orange, n_balls=1, n_boosts=34, include_y=
 
     x_ball = initializer.zeros((size, n_balls, n_features))
     x_boost = initializer.zeros((size, n_boosts, n_features))
-    x_blue = initializer.zeros((size, n_blue, n_features))
-    x_orange = initializer.zeros((size, n_orange, n_features))
+    x_players = initializer.zeros((size, n_players, n_features))
 
     x_ball[:, :, 0] = 1
     x_boost[:, :, 1] = 1
-    x_blue[:, :, 2] = 1
-    x_orange[:, :, 3] = 1
 
     if not include_y:
-        return [x_ball, x_boost, x_blue, x_orange]
+        return [x_ball, x_boost, x_players]
 
     y_score = initializer.full((size,), -100)
     y_next_touch = initializer.full((size, n_balls,), -100)
-    y_collect = initializer.full((size, n_blue + n_orange,), -100)
-    y_demo = initializer.full((size, n_blue + n_orange,), -100)
+    y_collect = initializer.full((size, n_players,), -100)
+    y_demo = initializer.full((size, n_players,), -100)
 
-    y_throttle = initializer.full((size, n_blue + n_orange), -100)
-    y_steer = initializer.full((size, n_blue + n_orange), -100)
-    y_pitch = initializer.full((size, n_blue + n_orange), -100)
-    y_yaw = initializer.full((size, n_blue + n_orange), -100)
-    y_roll = initializer.full((size, n_blue + n_orange), -100)
-    y_jump = initializer.full((size, n_blue + n_orange), -100)
-    y_boost = initializer.full((size, n_blue + n_orange), -100)
-    y_handbrake = initializer.full((size, n_blue + n_orange), -100)
+    y_throttle = initializer.full((size, n_players), -100)
+    y_steer = initializer.full((size, n_players), -100)
+    y_pitch = initializer.full((size, n_players), -100)
+    y_yaw = initializer.full((size, n_players), -100)
+    y_roll = initializer.full((size, n_players), -100)
+    y_jump = initializer.full((size, n_players), -100)
+    y_boost = initializer.full((size, n_players), -100)
+    y_handbrake = initializer.full((size, n_players), -100)
 
-    return [x_ball, x_boost, x_blue, x_orange], \
+    return [x_ball, x_boost, x_players], \
            [y_score, y_next_touch, y_collect, y_demo,
             y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake]
 
@@ -375,14 +378,11 @@ def normalize(x_data):
         1., 1., 1.,
         2300., 2300., 2300.,
         5.5, 5.5, 5.5,
-        100., 1.
-    ])
-    x_ball, x_boost, x_blue, x_orange = x_data
+        100., 1., 1., 1.
+    ], dtype=np.float32)
 
-    x_ball /= norms
-    x_boost /= norms
-    x_blue /= norms
-    x_orange /= norms
+    for i in range(len(x_data)):
+        x_data[i] /= norms
 
 
 def swap_teams(x_data, y_data=None, indices=None):
@@ -398,17 +398,15 @@ def swap_teams(x_data, y_data=None, indices=None):
         -1., -1., 1.,
         1., 1.
     ])
-    x_ball, x_boost, x_blue, x_orange = x_data
+
+    x_ball, x_boost, x_players = x_data
 
     x_ball[indices, :, :] *= swaps
-    if isinstance(x_boost, torch.Tensor):
-        x_boost[indices, :, :] = x_boost[indices, :, :].flip(1) * swaps
-        x_blue[indices, :, 4:], x_orange[indices, :, 4:] = \
-            x_orange[indices, :, 4:].flip(1) * swaps[4:], x_blue[indices, :, 4:].flip(1) * swaps[4:]
-    else:
-        x_boost[indices, :, :] = x_boost[indices, ::-1, :] * swaps
-        x_blue[indices, :, 4:], x_orange[indices, :, 4:] = \
-            x_orange[indices, ::-1, 4:] * swaps[4:], x_blue[indices, ::-1, 4:] * swaps[4:]
+
+    x_boost[indices, :, :] = x_boost[indices, :, :] * swaps
+
+    x_players[indices, :, :] = x_players[indices, :, :] * swaps
+    x_players[indices, :, [2, 3]] = x_players[indices, :, [3, 2]]  # Swap blue/orange indicator
 
     if y_data is None:
         return
@@ -416,45 +414,13 @@ def swap_teams(x_data, y_data=None, indices=None):
     (y_score, y_next_touch, y_collect, y_demo,
      y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake) = y_data
 
-    n_players = x_blue.shape[1] + x_orange.shape[1] - 1
-    n_boosts = x_boost.shape[1] - 1
+    # n_players = x_players.shape[1] - 1
 
     y_score[indices] = 1 - y_score[indices]
     y_score[y_score > 1] = -100
 
-    y_next_touch[indices, :] = n_players - y_next_touch[indices, :]
-    y_next_touch[y_next_touch > n_players] = -100
-
-    if isinstance(y_collect, torch.Tensor):
-        y_collect[indices, :] = n_boosts - y_collect[indices, :].flip(1)
-        y_collect[y_collect > n_boosts] = -100
-
-        y_demo[indices, :] = n_players - y_demo[indices, :].flip(1)
-        y_demo[y_demo > n_players] = -100
-
-        y_throttle[indices, :] = y_throttle[indices, :].flip(1)
-        y_steer[indices, :] = y_steer[indices, :].flip(1)
-        y_pitch[indices, :] = y_pitch[indices, :].flip(1)
-        y_yaw[indices, :] = y_yaw[indices, :].flip(1)
-        y_roll[indices, :] = y_roll[indices, :].flip(1)
-        y_jump[indices, :] = y_jump[indices, :].flip(1)
-        y_boost[indices, :] = y_boost[indices, :].flip(1)
-        y_handbrake[indices, :] = y_handbrake[indices, :].flip(1)
-    else:
-        y_collect[indices, :] = n_boosts - y_collect[indices, ::-1]
-        y_collect[y_collect > n_boosts] = -100
-
-        y_demo[indices, :] = n_players - y_demo[indices, ::-1]
-        y_demo[y_demo > n_players] = -100
-
-        y_throttle[indices, :] = y_throttle[indices, ::-1]
-        y_steer[indices, :] = y_steer[indices, ::-1]
-        y_pitch[indices, :] = y_pitch[indices, ::-1]
-        y_yaw[indices, :] = y_yaw[indices, ::-1]
-        y_roll[indices, :] = y_roll[indices, ::-1]
-        y_jump[indices, :] = y_jump[indices, ::-1]
-        y_boost[indices, :] = y_boost[indices, ::-1]
-        y_handbrake[indices, :] = y_handbrake[indices, ::-1]
+    # y_next_touch[indices, :] = n_players - y_next_touch[indices, :]
+    # y_next_touch[y_next_touch > n_players] = -100
 
 
 def swap_left_right(x_data, y_data=None, indices=None):
@@ -470,31 +436,18 @@ def swap_left_right(x_data, y_data=None, indices=None):
     if indices is None:
         indices = slice(None)
     # Not really necessary for transformer
-    boost_indices = [0, 2, 1, 4, 3, 6, 5, 7, 9, 8, 11, 10, 14, 13, 12, 18, 17,
-                     16, 15, 21, 20, 19, 23, 22, 25, 24, 26, 28, 27, 30, 29, 32, 31, 33]
-    boost_map = {k: v for k, v in zip(range(34), boost_indices)}
-    boost_map[-100] = -100
-    x_ball, x_boost, x_blue, x_orange = x_data
+    x_ball, x_boost, x_players = x_data
+
     x_ball[indices, :, :] *= swaps
-    # x_boost[indices, :, :] *= swaps
-    x_boost[indices, :, :] = x_boost[indices][:, boost_indices, :] * swaps
-    x_blue[indices, :, :] *= swaps
-    x_orange[indices, :, :] *= swaps
+    x_boost[indices, :, :] *= swaps
+    x_players[indices, :, :] *= swaps
 
     if y_data is None:
         return
 
     (y_score, y_next_touch, y_collect, y_demo,
      y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake) = y_data
-    # y_collect[indices, :] = y_collect[indices, :]
-    y_collect_orig = y_collect.copy()
-    for key, value in boost_map.items():
-        key_indices = y_collect_orig == key
-        keep = key_indices[indices].copy()
-        key_indices[:] = False
-        key_indices[indices] = keep
-        y_collect[key_indices] = value
-    
+
     y_steer[indices, :] = 2 - y_steer[indices, :]
     y_steer[y_steer > 2] = -100
 
@@ -505,24 +458,46 @@ def swap_left_right(x_data, y_data=None, indices=None):
     y_roll[y_roll > 2] = -100
 
 
-class ReplayCollectionDataset(Dataset):
-    def __init__(self, folder, i=0):
-        files = [f for f in os.listdir(folder) if f.startswith("x_ball") and "npz" not in f]
-        for file in files[i:]:
-            self.x_data = []
-            for name in ("ball", "boost", "blue", "orange"):
-                self.x_data.append(np.load(os.path.join(folder, file.replace("ball", name))))
-            self.y_data = []
-            for name in ("score", "next_touch", "collect", "demo",
-                         "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake"):
-                self.y_data.append(np.load(os.path.join(folder, file.replace("x_ball", f"y_{name}"))))
-            break
+class ReplayCollectionDataset(IterableDataset):
+    def __init__(self, h5_group, batch_size=512, buf_size=65536):
+        self.h5_group = h5_group
+        self.x_data = self.h5_group["x_data"]
+        self.y_data = self.h5_group["y_data"]
+        self.batch_size = batch_size
+        self.buf_size = buf_size
+        self.tot_size = self.x_data["balls"].shape[0]
+        assert self.buf_size % self.batch_size == 0
 
     def __getitem__(self, index) -> T_co:
-        return tuple(v[index] for v in self.x_data), tuple(v[index] for v in self.y_data)
+        return tuple(self.x_data[name][index] for name in X_DATASET_NAMES), \
+               tuple(self.y_data[name][index] for name in Y_DATASET_NAMES)
+
+    def __iter__(self) -> Iterator[T_co]:
+        self.index = 0
+        self.buf_index = 0
+
+        return self
+
+    def __next__(self):
+        if self.index + self.buf_size >= self.tot_size:
+            raise StopIteration
+        elif self.buf_index == 0:
+            perm = np.random.permutation(self.buf_size)
+
+            self.buf_x = tuple(
+                self.x_data[name][self.index: self.index + self.buf_size][perm] for name in X_DATASET_NAMES)
+            self.buf_y = tuple(
+                self.y_data[name][self.index: self.index + self.buf_size][perm] for name in Y_DATASET_NAMES)
+
+        batch = tuple(v[self.buf_index: self.buf_index + self.batch_size] for v in self.buf_x), \
+                tuple(v[self.buf_index: self.buf_index + self.batch_size] for v in self.buf_y)
+
+        self.index += self.batch_size
+        self.buf_index = (self.buf_index + self.batch_size) % self.buf_size
+        return batch
 
     def __len__(self):
-        return self.x_data[0].shape[0]
+        return (self.tot_size - self.buf_size) // self.batch_size - 1
 
 
 if __name__ == '__main__':
@@ -532,79 +507,110 @@ if __name__ == '__main__':
     key = sys.argv[1]
 
     api = bc.Api(key)
-    size = 1_000_000
-    buf_x, buf_y = get_base_features(size, 3, 3)
-    print((sum(v.nbytes for v in buf_x) + sum(v.nbytes for v in buf_y)) / 1e9)
-    i = j = 0
-    n = 0
-    path = r"D:\rokutleg\datasets\rlcsx"
-    for replay in iterate_replays(api,
-                                  replay_folder=r"D:\rokutleg\replays\rlcsx",
-                                  cache_folder=r"D:\rokutleg\processed\rlcsx"):
-        try:
-            x, y = replay
+    replay_ids = itertools.chain(
+        (r["id"] for r in api.get_group_replays("rlcs-x-eu-split-3-regional-3-012chb5iof")),
+        (r["id"] for r in api.get_group_replays("rlcs-x-na-split-3-regional-3-m2j1wbxoxy"))
+    )
 
-            x_s, y_s = [np.copy(v) for v in x], [np.copy(v) for v in y]
-            # swap_teams(x_s, y_s)
-            # swap_teams(x_s, y_s)
-            # assert all(np.allclose(v, v_s) for v, v_s in zip(x, x_s)) and all(np.allclose(v, v_s) for v, v_s in zip(y, y_s))
-            swap_teams(x_s, y_s)
+    size = 1
+    x, y = get_base_features(size, 6)
+    path = r"D:\rokutleg\datasets\rlcsx.hdf5"
+    with h5py.File(path, "w") as file:
+        for group in "train", "val", "test":
+            group = file.create_group(group)
+            x_data = group.create_group("x_data")
+            y_data = group.create_group("y_data")
 
-            x_m, y_m = [np.copy(v) for v in x], [np.copy(v) for v in y]
-            # swap_left_right(x_m, y_m)
-            # swap_left_right(x_m, y_m)
-            # assert all(np.allclose(v, v_m) for v, v_m in zip(x, x_m)) and all(np.allclose(v, v_m) for v, v_m in zip(y, y_m))
-            swap_left_right(x_m, y_m)
+            for x_dataset_name, shape in zip(X_DATASET_NAMES, (1, 34, 6)):
+                x_data.create_dataset(x_dataset_name, shape=(0, shape, 21), maxshape=(None, shape, 21))
 
-            x_sm, y_sm = [np.copy(v) for v in x_s], [np.copy(v) for v in y_s]
-            # swap_left_right(x_sm, y_sm)
-            # swap_left_right(x_sm, y_sm)
-            # assert all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(x_s, x_sm)) and all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(y_s, y_sm))
-            swap_left_right(x_sm, y_sm)
-            # continue
-        except Exception as e:
-            print(e)
-            continue
+            for y_dataset_name, shape in zip(Y_DATASET_NAMES, (0, 1, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6)):
+                if shape > 0:
+                    y_data.create_dataset(y_dataset_name, shape=(0, shape), maxshape=(None, shape))
+                else:
+                    y_data.create_dataset(y_dataset_name, shape=(0,), maxshape=(None,))
 
-        if i + 4 * len(x[0]) > len(buf_x[0]):
-            normalize(buf_x)
-            for arr, name in zip(buf_x, ("ball", "boost", "blue", "orange")):
-                np.save(rf"{path}\x_{name}-{n}", arr)
-            for arr, name in zip(buf_y, ("score", "next_touch", "collect", "demo",
-                                         "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake")):
-                np.save(rf"{path}\y_{name}-{n}", arr)
-            print("Buffer:", n)
-            buf_x, buf_y = get_base_features(size, 3, 3)
-            n += 1
-            i = j = 0
+        # print((sum(v.nbytes for v in buf_x) + sum(v.nbytes for v in buf_y)) / 1e9)
+        i = j = 0
+        n = 0
+        for replay in iterate_replays(api,
+                                      # replay_ids=replay_ids,
+                                      replay_folder=r"D:\rokutleg\replays\rlcsx",
+                                      cache_folder=r"D:\rokutleg\processed\rlcsx"):
+            try:
+                x, y = replay
 
-        for buf_v, v, v_s, v_m, v_sm in zip(buf_x, x, x_s, x_m, x_sm):
-            j = i
-            buf_v[j:j + len(v)] = v
-            j += len(v)
-            buf_v[j:j + len(v)] = v_s
-            j += len(v_s)
-            buf_v[j:j + len(v)] = v_m
-            j += len(v_m)
-            buf_v[j:j + len(v)] = v_sm
-            j += len(v_sm)
+                normalize(x)
 
-        for buf_v, v, v_s, v_m, v_sm in zip(buf_y, y, y_s, y_m, y_sm):
-            j = i
-            buf_v[j:j + len(v)] = v
-            j += len(v)
-            buf_v[j:j + len(v)] = v_s
-            j += len(v_s)
-            buf_v[j:j + len(v)] = v_m
-            j += len(v_m)
-            buf_v[j:j + len(v)] = v_sm
-            j += len(v_sm)
+                x_s, y_s = [np.copy(v) for v in x], [np.copy(v) for v in y]
+                # swap_teams(x_s, y_s)
+                # swap_teams(x_s, y_s)
+                # assert all(np.allclose(v, v_s) for v, v_s in zip(x, x_s)) and all(np.allclose(v, v_s) for v, v_s in zip(y, y_s))
+                swap_teams(x_s, y_s)
 
-        i = j
-    normalize(buf_x)
-    for arr, name in zip(buf_x, ("ball", "boost", "blue", "orange")):
-        np.save(rf"{path}\x_{name}-{n}", arr)
-    for arr, name in zip(buf_y, ("score", "next_touch", "collect", "demo",
-                                 "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake")):
-        np.save(rf"{path}\y_{name}-{n}", arr)
-    print("Buffer:", n)
+                x_m, y_m = [np.copy(v) for v in x], [np.copy(v) for v in y]
+                # swap_left_right(x_m, y_m)
+                # swap_left_right(x_m, y_m)
+                # assert all(np.allclose(v, v_m) for v, v_m in zip(x, x_m)) and all(np.allclose(v, v_m) for v, v_m in zip(y, y_m))
+                swap_left_right(x_m, y_m)
+
+                x_sm, y_sm = [np.copy(v) for v in x_s], [np.copy(v) for v in y_s]
+                # swap_left_right(x_sm, y_sm)
+                # swap_left_right(x_sm, y_sm)
+                # assert all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(x_s, x_sm)) and all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(y_s, y_sm))
+                swap_left_right(x_sm, y_sm)
+                # continue
+                assert not any(np.isnan(v).any() for v in x), "NaN in x"
+                assert not any(np.isnan(v).any() for v in y), "NaN in x"
+            except Exception as e:
+                print(e)
+                continue
+
+            if n < 70:
+                group = file["train"]
+            elif n < 70 + 15:
+                group = file["val"]
+            else:
+                group = file["test"]
+
+            x_data = group["x_data"]
+            y_data = group["y_data"]
+
+            n = (n + 87) % 100  # Smallest coprime which generates train->val->test at the start
+
+            i = len(x_data["balls"])
+            new_len = i + 4 * x[0].shape[0]
+
+            for name, v, v_s, v_m, v_sm in zip(X_DATASET_NAMES, x, x_s, x_m, x_sm):
+                ds = x_data[name]
+                ds.resize(new_len, axis=0)
+                j = i
+                ds[j:j + len(v)] = v
+                j += len(v)
+                ds[j:j + len(v)] = v_s
+                j += len(v_s)
+                ds[j:j + len(v)] = v_m
+                j += len(v_m)
+                ds[j:j + len(v)] = v_sm
+                j += len(v_sm)
+
+            for name, v, v_s, v_m, v_sm in zip(Y_DATASET_NAMES, y, y_s, y_m, y_sm):
+                ds = y_data[name]
+                ds.resize(new_len, axis=0)
+                j = i
+                ds[j:j + len(v)] = v
+                j += len(v)
+                ds[j:j + len(v)] = v_s
+                j += len(v_s)
+                ds[j:j + len(v)] = v_m
+                j += len(v_m)
+                ds[j:j + len(v)] = v_sm
+                j += len(v_sm)
+
+            i = j
+        # for arr, name in zip(buf_x, ("ball", "boost", "players")):
+        #     np.save(rf"{path}\x_{name}-{n}", arr[:i])
+        # for arr, name in zip(buf_y, ("score", "next_touch", "collect", "demo",
+        #                              "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake")):
+        #     np.save(rf"{path}\y_{name}-{n}", arr[:i])
+        # print("Buffer:", n)
