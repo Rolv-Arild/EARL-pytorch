@@ -13,6 +13,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.torch_layers import MlpExtractor
 from stable_baselines3.common.type_aliases import Schedule
+from stable_baselines3.common.vec_env import VecNormalize, VecCheckNan
 from stable_baselines3.ppo import MlpPolicy
 from torch import nn
 
@@ -95,56 +96,6 @@ class EARLPolicy(MlpPolicy):
     def extract_features(self, obs: th.Tensor) -> th.Tensor:
         return obs
 
-class TouchIncrementReward(RewardFunction):
-    def __init__(self):
-        super().__init__()
-        self.touch_count = 0
-
-    def reset(self, initial_state: GameState):
-        self.touch_count = 0
-
-    def get_reward(self, player: PlayerData, state: GameState, previous_action: np.ndarray) -> float:
-        if player.ball_touched:
-            if player.car_id == state.last_touch:
-                self.touch_count += 1
-            else:
-                self.touch_count = 1
-        return self.touch_count
-
-
-class RewardScaler(RewardFunction):
-    lock = multiprocessing.Lock()
-    total = multiprocessing.Value("d", 0., lock=False)
-    total_squared = multiprocessing.Value("d", 0., lock=False)
-    n = multiprocessing.Value("d", 0., lock=False)
-
-    def __init__(self, reward_func: RewardFunction):
-        super().__init__()
-        self.reward_func = reward_func
-
-    def reset(self, initial_state: GameState):
-        self.reward_func.reset(initial_state)
-        # print("Values:", self.total.value, self.total_squared.value, self.n.value)
-
-    def get_reward(self, player: PlayerData, state: GameState, previous_action: np.ndarray) -> float:
-        reward = self.reward_func.get_reward(player, state, previous_action)
-
-        self.lock.acquire()
-        total, total_squared, n = self.total.value, self.total_squared.value, self.n.value
-        self.total.value += reward
-        self.total_squared.value += reward * reward
-        self.n.value += 1
-        self.lock.release()
-
-        if n > 1:
-            var = (total_squared - (total * total) / n) / (n - 1)
-            mean = total / n
-            scaled_reward = (reward - mean) / (var ** 0.5)
-        else:
-            scaled_reward = 0
-
-        return scaled_reward
-
 
 class LogCombinedReward(CombinedReward):
     def __init__(self, reward_functions: Tuple[RewardFunction, ...],
@@ -194,15 +145,14 @@ if __name__ == '__main__':
 
     def get_args():
         fps = 15
-        rew = RewardScaler(LogCombinedReward.from_zipped(
+        rew = LogCombinedReward.from_zipped(
             # (EventReward(goal=0, team_goal=100, concede=-100, touch=1, shot=10, save=10, demo=10), 1),
             # (BallYCoordinateReward(), 0.1 / fps),
             # (RewardIfBehindBall(ConstantReward()), 0.01 / fps),
             (VelocityPlayerToBallReward(use_scalar_projection=False), 0.1 / fps),
             # (SaveBoostReward(), 0.01 / fps),
-        ))
+        )
         # rew = StandStillReward()
-        # rew = RewardScaler(SecretSauce(fps))
         return dict(
             team_size=2,
             tick_skip=120 // fps,
@@ -214,7 +164,9 @@ if __name__ == '__main__':
 
 
     rl_path = r"C:\Program Files\Epic Games\rocketleague\Binaries\Win64\RocketLeague.exe"
-    env = VecMonitor(MDWrapper(rl_path, 6, get_args))
+
+    # Note that VecNormalize is slightly modified with a np.asarray on the tuple of observations
+    env = VecNormalize(VecMonitor(VecCheckNan(MDWrapper(rl_path, 6, get_args))), norm_obs=False, clip_reward=1000, gamma=0.995)
     # env = VecEnvWrapper(rlgym.make("DuelSelf"))
 
     model = PPO(EARLPolicy, env, n_epochs=1, target_kl=0.02 / 1.5, learning_rate=1e-4, ent_coef=0.01, vf_coef=1,
