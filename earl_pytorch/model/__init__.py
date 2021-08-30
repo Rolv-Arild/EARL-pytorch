@@ -1,4 +1,4 @@
 from .earl import EARL
-from .rank_model import EARLRankModel
-from .replay_model import EARLReplayModel
-from .actor_critic import EARLActorCritic
+from .earl_perceiver import EARLPerceiver
+from .eprl import EPRL
+from outputs import *

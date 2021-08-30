@@ -2,37 +2,19 @@ import itertools
 import logging
 import os
 import pickle
+from datetime import datetime, timedelta
 from typing import Iterator
 
 import h5py
 import numpy as np
-import pandas as pd
-import pytorch_lightning
 import torch
-from torch.utils.data import Dataset
+from carball.analysis.analysis_manager import AnalysisManager
 from torch.utils.data.dataset import T_co, IterableDataset
 from tqdm import tqdm
 
+from earl_pytorch.util.constants import DEFAULT_FEATURES, IS_BALL, IS_BOOST, BALL_COLS, PLAYER_COLS, \
+    DEFAULT_FEATURES_STR, IS_BLUE, IS_ORANGE, POS_X, POS_Y, POS_Z, BOOST_AMOUNT, IS_DEMOED
 from earl_pytorch.util.util import boost_locations, rotator_to_matrix
-
-FEATURES = [
-    "is_ball", "is_boost", "is_blue", "is_orange",
-    "pos_x", "pos_y", "pos_z",
-    "forward_x", "forward_y", "forward_z",
-    "up_x", "up_y", "up_z",
-    "vel_x", "vel_y", "vel_z",
-    "ang_vel_x", "ang_vel_y", "ang_vel_z",
-    "boost_amount", "is_demoed"
-]
-
-LABELS = [
-    "score", "next_touch", "boost_collect", "demo",
-    "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake"
-]
-
-BALL_COLS = [4, 5, 6, 13, 14, 15, 16, 17, 18]
-BOOST_COLS = [4, 5, 6, 19, 20]
-PLAYER_COLS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
 
 X_DATASET_NAMES = ("balls", "boosts", "players")
 Y_DATASET_NAMES = ("next_goal", "next_touch", "next_boost", "next_demo",
@@ -68,9 +50,14 @@ def iterate_replays(bc_api, replay_ids=None, replay_folder=None, cache_folder=No
             yield convert_dfs(processed)
     elif replay_folder is not None and cache_folder is None:
         for replay_file in tqdm(os.listdir(replay_folder), "Replay processing"):
-            replay_path = os.path.join(replay_folder, replay_file)
-            processed = replay_to_dfs(replay_path)
-            yield convert_dfs(processed)
+            try:
+                replay_path = os.path.join(replay_folder, replay_file)
+                processed = replay_to_dfs(replay_path, skip_ties=False, skip_kickoffs=True)
+                yield convert_dfs(processed)
+            except Exception as e:
+                # raise e
+                print(e)
+                continue
     elif replay_folder is None and cache_folder is not None:
         for cache_file in tqdm(os.listdir(cache_folder), "Replay loading"):
             with open(cache_file, "rb") as handle:
@@ -193,7 +180,7 @@ def replay_to_dfs(replay, skip_ties=True, skip_kickoffs=True):
             "players": player_df}
 
 
-def convert_dfs(dfs, tensors=False, frame_mode=15):
+def convert_dfs(dfs, tensors=False, frame_mode=1):
     frames, rallies, touches, boost_grabs, demos, player_df = \
         (dfs[k] for k in ("frames", "rallies", "touches", "boost_grabs", "demos", "players"))
 
@@ -206,29 +193,29 @@ def convert_dfs(dfs, tensors=False, frame_mode=15):
     else:
         convert_fn = lambda x: x
 
-    x, y = get_base_features(len(frames), len(player_df), tensors=tensors)
+    x, y = get_base_features(len(frames), 6, tensors=tensors)
     x_ball, x_boost, x_players = x
     (y_score, y_next_touch, y_collect, y_demo,
      y_throttle, y_steer, y_pitch, y_yaw, y_roll, y_jump, y_boost, y_handbrake) = y
 
     x_ball[:, 0, BALL_COLS] = \
         convert_fn(
-            frames[[f"ball/{col}" for col in map(FEATURES.__getitem__, BALL_COLS)]].values)
+            frames[[f"ball/{col}" for col in map(DEFAULT_FEATURES_STR.__getitem__, BALL_COLS)]].values)
 
     bins = np.array([-50, -0.1, 0.1])  # np.arange(0.25 / 2 - 1, 1, 0.25)
 
     for i, row in player_df.iterrows():
         color = row["color"]
         if color == "blue":
-            x_players[:, i, 2] = 1
+            x_players[:, i, IS_BLUE] = 1
         elif color == "orange":
-            x_players[:, i, 3] = 1
+            x_players[:, i, IS_ORANGE] = 1
         else:
             raise ValueError(color)
 
-        x_players[:, i, PLAYER_COLS] = \
+        x_players[:, i, PLAYER_COLS[:-3]] = \
             convert_fn(frames[[f"{i}/{col}" for col in
-                               map(FEATURES.__getitem__, PLAYER_COLS)]].values)
+                               map(DEFAULT_FEATURES_STR.__getitem__, PLAYER_COLS[:-3])]].fillna(0.).values)
 
         throttle = np.digitize(frames[f"{i}/throttle_control"].fillna(-100).values, bins) - 1
         steer = np.digitize(frames[f"{i}/steer_control"].fillna(-100).values, bins) - 1
@@ -258,10 +245,10 @@ def convert_dfs(dfs, tensors=False, frame_mode=15):
         y_handbrake[:, i] = convert_fn(handbrake)
 
     for i, (x, y, z) in enumerate(boost_locations):
-        x_boost[:, i, 4] = x
-        x_boost[:, i, 5] = y
-        x_boost[:, i, 6] = z
-        x_boost[:, i, 19] = 100. if z > 72 else 12
+        x_boost[:, i, POS_X] = x
+        x_boost[:, i, POS_Y] = y
+        x_boost[:, i, POS_Z] = z
+        x_boost[:, i, BOOST_AMOUNT] = 100. if z > 72 else 12
 
     for _, rally in rallies.iterrows():
         indices = (rally["start_frame"] <= frames.index) & (frames.index <= rally["end_frame"])
@@ -303,8 +290,8 @@ def convert_dfs(dfs, tensors=False, frame_mode=15):
                 else:
                     collected_indices = (frames.index - frame >= 0) & (frames.index - frame < 4 * 30)
 
-                x_boost[collected_indices, boost_id, 19] = 0.
-                x_boost[collected_indices, boost_id, 20] = 1.
+                x_boost[collected_indices, boost_id, BOOST_AMOUNT] = 0.
+                x_boost[collected_indices, boost_id, IS_DEMOED] = 1.
 
                 indices = (last_frame <= frames.index) & (frames.index < frame)
                 y_collect[indices, i] = boost_id
@@ -317,7 +304,7 @@ def convert_dfs(dfs, tensors=False, frame_mode=15):
                 j = demo["victim"]
 
                 demoed_indices = (frames.index - frame >= 0) & (frames.index - frame < 30 * 3)
-                x_players[demoed_indices, j, 20] = 1
+                x_players[demoed_indices, j, IS_DEMOED] = 1
 
                 indices = (last_frame <= frames.index) & (frames.index < frame)
                 y_demo[indices, i] = j
@@ -334,7 +321,7 @@ def convert_dfs(dfs, tensors=False, frame_mode=15):
 
 def get_base_features(size, n_players, n_balls=1, n_boosts=34, include_y=True, tensors=False, n_features=None):
     if n_features is None:
-        n_features = len(FEATURES)
+        n_features = len(DEFAULT_FEATURES)
 
     if tensors:
         initializer = torch
@@ -345,8 +332,8 @@ def get_base_features(size, n_players, n_balls=1, n_boosts=34, include_y=True, t
     x_boost = initializer.zeros((size, n_boosts, n_features))
     x_players = initializer.zeros((size, n_players, n_features))
 
-    x_ball[:, :, 0] = 1
-    x_boost[:, :, 1] = 1
+    x_ball[:, :, IS_BALL] = 1
+    x_boost[:, :, IS_BOOST] = 1
 
     if not include_y:
         return [x_ball, x_boost, x_players]
@@ -372,6 +359,7 @@ def get_base_features(size, n_players, n_balls=1, n_boosts=34, include_y=True, t
 
 def normalize(x_data):
     norms = np.array([
+        1.,
         1., 1., 1., 1.,
         2300., 2300., 2300.,
         1., 1., 1.,
@@ -379,7 +367,7 @@ def normalize(x_data):
         2300., 2300., 2300.,
         5.5, 5.5, 5.5,
         100., 1., 1., 1.
-    ], dtype=np.float32)
+    ], dtype=np.float32)[:x_data[0].shape[-1]]
 
     for i in range(len(x_data)):
         x_data[i] /= norms
@@ -390,14 +378,15 @@ def swap_teams(x_data, y_data=None, indices=None):
         indices = slice(None)
 
     swaps = np.array([
+        1.,
         1., 1., 1., 1.,
         -1., -1., 1.,
         -1., -1., 1.,
         -1., -1., 1.,
         -1., -1., 1.,
         -1., -1., 1.,
-        1., 1.
-    ])
+        1., 1., 1., 1.
+    ])[:x_data[0].shape[-1]]
 
     x_ball, x_boost, x_players = x_data
 
@@ -406,7 +395,8 @@ def swap_teams(x_data, y_data=None, indices=None):
     x_boost[indices, :, :] = x_boost[indices, :, :] * swaps
 
     x_players[indices, :, :] = x_players[indices, :, :] * swaps
-    x_players[indices, :, [2, 3]] = x_players[indices, :, [3, 2]]  # Swap blue/orange indicator
+    x_players[indices, :, [IS_BLUE, IS_ORANGE]] = x_players[indices, :,
+                                                  [IS_ORANGE, IS_BLUE]]  # Swap blue/orange indicator
 
     if y_data is None:
         return
@@ -425,14 +415,15 @@ def swap_teams(x_data, y_data=None, indices=None):
 
 def swap_left_right(x_data, y_data=None, indices=None):
     swaps = np.array([
+        1.,
         1., 1., 1., 1.,
         -1., 1., 1.,
         -1., 1., 1.,
         -1., 1., 1.,
         -1., 1., 1.,
         -1., 1., 1.,
-        1., 1.
-    ])
+        1., 1., 1., 1.
+    ])[:x_data[0].shape[-1]]
     if indices is None:
         indices = slice(None)
     # Not really necessary for transformer
@@ -456,161 +447,3 @@ def swap_left_right(x_data, y_data=None, indices=None):
 
     y_roll[indices, :] = 2 - y_roll[indices, :]
     y_roll[y_roll > 2] = -100
-
-
-class ReplayCollectionDataset(IterableDataset):
-    def __init__(self, h5_group, batch_size=512, buf_size=65536):
-        self.h5_group = h5_group
-        self.x_data = self.h5_group["x_data"]
-        self.y_data = self.h5_group["y_data"]
-        self.batch_size = batch_size
-        self.buf_size = buf_size
-        self.tot_size = self.x_data["balls"].shape[0]
-        assert self.buf_size % self.batch_size == 0
-
-    def __getitem__(self, index) -> T_co:
-        return tuple(self.x_data[name][index] for name in X_DATASET_NAMES), \
-               tuple(self.y_data[name][index] for name in Y_DATASET_NAMES)
-
-    def __iter__(self) -> Iterator[T_co]:
-        self.index = 0
-        self.buf_index = 0
-
-        return self
-
-    def __next__(self):
-        if self.index + self.buf_size >= self.tot_size:
-            raise StopIteration
-        elif self.buf_index == 0:
-            perm = np.random.permutation(self.buf_size)
-
-            self.buf_x = tuple(
-                self.x_data[name][self.index: self.index + self.buf_size][perm] for name in X_DATASET_NAMES)
-            self.buf_y = tuple(
-                self.y_data[name][self.index: self.index + self.buf_size][perm] for name in Y_DATASET_NAMES)
-
-        batch = tuple(v[self.buf_index: self.buf_index + self.batch_size] for v in self.buf_x), \
-                tuple(v[self.buf_index: self.buf_index + self.batch_size] for v in self.buf_y)
-
-        self.index += self.batch_size
-        self.buf_index = (self.buf_index + self.batch_size) % self.buf_size
-        return batch
-
-    def __len__(self):
-        return (self.tot_size - self.buf_size) // self.batch_size - 1
-
-
-if __name__ == '__main__':
-    import sys
-    import ballchasing as bc
-
-    key = sys.argv[1]
-
-    api = bc.Api(key)
-    replay_ids = itertools.chain(
-        (r["id"] for r in api.get_group_replays("rlcs-x-eu-split-3-regional-3-012chb5iof")),
-        (r["id"] for r in api.get_group_replays("rlcs-x-na-split-3-regional-3-m2j1wbxoxy"))
-    )
-
-    size = 1
-    x, y = get_base_features(size, 6)
-    path = r"D:\rokutleg\datasets\rlcsx.hdf5"
-    with h5py.File(path, "w") as file:
-        for group in "train", "val", "test":
-            group = file.create_group(group)
-            x_data = group.create_group("x_data")
-            y_data = group.create_group("y_data")
-
-            for x_dataset_name, shape in zip(X_DATASET_NAMES, (1, 34, 6)):
-                x_data.create_dataset(x_dataset_name, shape=(0, shape, 21), maxshape=(None, shape, 21))
-
-            for y_dataset_name, shape in zip(Y_DATASET_NAMES, (0, 1, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6)):
-                if shape > 0:
-                    y_data.create_dataset(y_dataset_name, shape=(0, shape), maxshape=(None, shape))
-                else:
-                    y_data.create_dataset(y_dataset_name, shape=(0,), maxshape=(None,))
-
-        # print((sum(v.nbytes for v in buf_x) + sum(v.nbytes for v in buf_y)) / 1e9)
-        i = j = 0
-        n = 0
-        for replay in iterate_replays(api,
-                                      # replay_ids=replay_ids,
-                                      replay_folder=r"D:\rokutleg\replays\rlcsx",
-                                      cache_folder=r"D:\rokutleg\processed\rlcsx"):
-            try:
-                x, y = replay
-
-                normalize(x)
-
-                x_s, y_s = [np.copy(v) for v in x], [np.copy(v) for v in y]
-                # swap_teams(x_s, y_s)
-                # swap_teams(x_s, y_s)
-                # assert all(np.allclose(v, v_s) for v, v_s in zip(x, x_s)) and all(np.allclose(v, v_s) for v, v_s in zip(y, y_s))
-                swap_teams(x_s, y_s)
-
-                x_m, y_m = [np.copy(v) for v in x], [np.copy(v) for v in y]
-                # swap_left_right(x_m, y_m)
-                # swap_left_right(x_m, y_m)
-                # assert all(np.allclose(v, v_m) for v, v_m in zip(x, x_m)) and all(np.allclose(v, v_m) for v, v_m in zip(y, y_m))
-                swap_left_right(x_m, y_m)
-
-                x_sm, y_sm = [np.copy(v) for v in x_s], [np.copy(v) for v in y_s]
-                # swap_left_right(x_sm, y_sm)
-                # swap_left_right(x_sm, y_sm)
-                # assert all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(x_s, x_sm)) and all(np.allclose(v_s, v_sm) for v_s, v_sm in zip(y_s, y_sm))
-                swap_left_right(x_sm, y_sm)
-                # continue
-                assert not any(np.isnan(v).any() for v in x), "NaN in x"
-                assert not any(np.isnan(v).any() for v in y), "NaN in x"
-            except Exception as e:
-                print(e)
-                continue
-
-            if n < 70:
-                group = file["train"]
-            elif n < 70 + 15:
-                group = file["val"]
-            else:
-                group = file["test"]
-
-            x_data = group["x_data"]
-            y_data = group["y_data"]
-
-            n = (n + 87) % 100  # Smallest coprime which generates train->val->test at the start
-
-            i = len(x_data["balls"])
-            new_len = i + 4 * x[0].shape[0]
-
-            for name, v, v_s, v_m, v_sm in zip(X_DATASET_NAMES, x, x_s, x_m, x_sm):
-                ds = x_data[name]
-                ds.resize(new_len, axis=0)
-                j = i
-                ds[j:j + len(v)] = v
-                j += len(v)
-                ds[j:j + len(v)] = v_s
-                j += len(v_s)
-                ds[j:j + len(v)] = v_m
-                j += len(v_m)
-                ds[j:j + len(v)] = v_sm
-                j += len(v_sm)
-
-            for name, v, v_s, v_m, v_sm in zip(Y_DATASET_NAMES, y, y_s, y_m, y_sm):
-                ds = y_data[name]
-                ds.resize(new_len, axis=0)
-                j = i
-                ds[j:j + len(v)] = v
-                j += len(v)
-                ds[j:j + len(v)] = v_s
-                j += len(v_s)
-                ds[j:j + len(v)] = v_m
-                j += len(v_m)
-                ds[j:j + len(v)] = v_sm
-                j += len(v_sm)
-
-            i = j
-        # for arr, name in zip(buf_x, ("ball", "boost", "players")):
-        #     np.save(rf"{path}\x_{name}-{n}", arr[:i])
-        # for arr, name in zip(buf_y, ("score", "next_touch", "collect", "demo",
-        #                              "throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake")):
-        #     np.save(rf"{path}\y_{name}-{n}", arr[:i])
-        # print("Buffer:", n)

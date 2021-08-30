@@ -6,16 +6,21 @@ import numpy as np
 import torch
 import tqdm
 from torch.utils import data as data
-from torch.utils.data.dataset import T_co, TensorDataset, ConcatDataset
+from torch.utils.data.dataset import T_co, TensorDataset, ConcatDataset, IterableDataset
 
-from earl_pytorch.dataset.create_dataset import replay_to_dfs, convert_dfs, normalize, swap_teams
+from earl_pytorch.dataset.create_dataset import replay_to_dfs, convert_dfs, normalize, swap_teams, swap_left_right, \
+    get_base_features
 
 
-class ReplayDataset(data.IterableDataset):
-    def __init__(self, replay_folder, cache_folder, limit=np.inf):
+class ReplayDataset(IterableDataset):
+    def __init__(self, replay_folder, cache_folder, limit=np.inf, batch_size=512, buffer_size=262144):
         self.replay_folder = replay_folder
         self.cache_folder = cache_folder
         self.limit = limit
+        self.batch_size = batch_size
+        self.buffer_size = buffer_size
+        self.buffer_x, self.buffer_y = get_base_features(buffer_size, 6)
+        self.n = 0
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -30,7 +35,6 @@ class ReplayDataset(data.IterableDataset):
             start = worker_info.id
             step = worker_info.num_workers
 
-        n = 0
         for dp, f in files[start::step]:
             try:
                 if self.replay_folder is None:
@@ -52,16 +56,47 @@ class ReplayDataset(data.IterableDataset):
                 assert x_n[2].shape == x_n[3].shape
                 normalize(x_n)
 
-                yield from zip(zip(*x_n), zip(*y_n))
+                x_s, y_s = [np.copy(v) for v in x_n], [np.copy(v) for v in y_n]
                 swap_teams(x_n, y_n)
-                yield from zip(zip(*x_n), zip(*y_n))
 
-                n += len(x_n[0])
-                if n >= self.limit:
-                    return
+                x_m, y_m = [np.copy(v) for v in x_n], [np.copy(v) for v in y_n]
+                swap_left_right(x_m, y_m)
+
+                x_sm, y_sm = [np.copy(v) for v in x_s], [np.copy(v) for v in y_s]
+                swap_left_right(x_sm, y_sm)
+
+                added_size = len(x_n[0]) * 4
+                if self.n + added_size >= self.buffer_size:
+                    indices = np.random.permutation(self.n)
+                    self.buffer_x = [v[indices] for v in self.buffer_x]
+                    self.buffer_y = [v[indices] for v in self.buffer_y]
+                    for i in range(0, self.n, self.batch_size):
+                        batch_x = tuple(torch.from_numpy(t[i:i + self.batch_size]).cuda() for t in self.buffer_x)
+                        batch_y = tuple(torch.from_numpy(t[i:i + self.batch_size]).cuda() for t in self.buffer_y)
+                        yield batch_x, batch_y
+                    self.buffer_x, self.buffer_y = get_base_features(self.buffer_size, 6)
+                    self.n = 0
+
+                self._fill_buffer(self.buffer_x, self.n, x_n, x_s, x_m, x_sm)
+                self._fill_buffer(self.buffer_y, self.n, y_n, y_s, y_m, y_sm)
+
+                self.n += added_size
+
             except Exception as e:
                 # print(e)
                 pass
+
+    def _fill_buffer(self, start, buffer, *arrs):
+        for ds, v, v_s, v_m, v_sm in zip(buffer, *arrs):
+            j = start
+            ds[j:j + len(v)] = v
+            j += len(v)
+            ds[j:j + len(v)] = v_s
+            j += len(v_s)
+            ds[j:j + len(v)] = v_m
+            j += len(v_m)
+            ds[j:j + len(v)] = v_sm
+            j += len(v_sm)
 
     def __len__(self):
         return self.limit

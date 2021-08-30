@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name='EARL-pytorch',
-    version='0.2.0',
+    version='0.3.0',
     packages=[''],
     url='https://github.com/Rolv-Arild/EARL-pytorch',
     license='MIT License',

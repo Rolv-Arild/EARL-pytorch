@@ -1,4 +1,3 @@
-import bisect
 import logging
 
 import carball as cb
@@ -6,10 +5,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from carball.controls.controls import ControlsCreator
-from matplotlib.axes import Axes
-from scipy.special import softmax
-from earl_pytorch.model import EARLReplayModel
-from earl_pytorch.dataset.create_dataset import replay_to_dfs, convert_dfs, normalize, swap_teams, swap_left_right
+
+from earl_pytorch.dataset.create_dataset import replay_to_dfs, convert_dfs, normalize
 
 
 def sigmoid(x):
@@ -20,7 +17,7 @@ def inv_sigmoid(x):
     return np.log(x / (1 - x))
 
 
-def predict_boost_values(rp, model: EARLReplayModel):
+def predict_boost_values(rp, model):
     if isinstance(rp, str):
         rp = cb.analyze_replay_file(rp,
                                     controls=ControlsCreator(),
@@ -65,7 +62,7 @@ def predict_boost_values(rp, model: EARLReplayModel):
     return results
 
 
-def make_summary(rp, model: EARLReplayModel):
+def make_summary(rp, model):
     if isinstance(rp, str):
         rp = cb.analyze_replay_file(rp,
                                     logging_level=logging.CRITICAL)
