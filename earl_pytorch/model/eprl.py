@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 from torch import nn as nn
 
-from earl_pytorch.util.constants import DEFAULT_FEATURES
+from ..util.constants import DEFAULT_FEATURES
 
 
 class EPRL(nn.Module):  # Experimental alternative to EARL, P stands for pooling-based

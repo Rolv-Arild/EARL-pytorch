@@ -4,7 +4,7 @@ import torch
 from torch import nn as nn
 from torch.nn.init import xavier_uniform_
 
-from earl_pytorch.util.constants import DEFAULT_FEATURES
+from ..util.constants import DEFAULT_FEATURES
 
 
 class EARL(nn.Module):

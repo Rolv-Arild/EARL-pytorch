@@ -8,8 +8,7 @@ import tqdm
 from torch.utils import data as data
 from torch.utils.data.dataset import T_co, TensorDataset, ConcatDataset, IterableDataset
 
-from earl_pytorch.dataset.create_dataset import replay_to_dfs, convert_dfs, normalize, swap_teams, swap_left_right, \
-    get_base_features
+from .create_dataset import replay_to_dfs, convert_dfs, normalize, swap_teams, swap_left_right, get_base_features
 
 
 class ReplayDataset(IterableDataset):

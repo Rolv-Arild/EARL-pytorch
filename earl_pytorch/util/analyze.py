@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from carball.controls.controls import ControlsCreator
 
-from earl_pytorch.dataset.create_dataset import replay_to_dfs, convert_dfs, normalize
+from ..dataset.create_dataset import replay_to_dfs, convert_dfs, normalize
 
 
 def sigmoid(x):

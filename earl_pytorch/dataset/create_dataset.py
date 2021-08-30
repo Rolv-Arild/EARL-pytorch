@@ -1,20 +1,14 @@
-import itertools
 import logging
 import os
 import pickle
-from datetime import datetime, timedelta
-from typing import Iterator
 
-import h5py
 import numpy as np
 import torch
-from carball.analysis.analysis_manager import AnalysisManager
-from torch.utils.data.dataset import T_co, IterableDataset
 from tqdm import tqdm
 
-from earl_pytorch.util.constants import DEFAULT_FEATURES, IS_BALL, IS_BOOST, BALL_COLS, PLAYER_COLS, \
-    DEFAULT_FEATURES_STR, IS_BLUE, IS_ORANGE, POS_X, POS_Y, POS_Z, BOOST_AMOUNT, IS_DEMOED
-from earl_pytorch.util.util import boost_locations, rotator_to_matrix
+from ..util.constants import DEFAULT_FEATURES, IS_BALL, IS_BOOST, BALL_COLS, PLAYER_COLS, DEFAULT_FEATURES_STR, IS_BLUE, \
+    IS_ORANGE, POS_X, POS_Y, POS_Z, BOOST_AMOUNT, IS_DEMOED
+from ..util.util import boost_locations, rotator_to_matrix
 
 X_DATASET_NAMES = ("balls", "boosts", "players")
 Y_DATASET_NAMES = ("next_goal", "next_touch", "next_boost", "next_demo",

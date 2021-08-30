@@ -1,9 +1,7 @@
 import json
 import os
-import random
 import subprocess
 import time
-from concurrent.futures import ProcessPoolExecutor
 from typing import Tuple, Iterator
 
 import numpy as np
@@ -15,11 +13,11 @@ from torch.optim import Adam
 from torch.utils.data.dataset import T_co, IterableDataset
 from tqdm.contrib.concurrent import process_map
 
-from earl_pytorch import EARL
-from earl_pytorch.dataset.create_dataset import get_base_features, normalize, swap_teams, swap_left_right
-from earl_pytorch.util.constants import POS_X, BALL_COLS, DEFAULT_FEATURES_STR, PLAYER_COLS, IS_BLUE, IS_ORANGE, \
-    POS_Y, POS_Z, BOOST_AMOUNT, IS_DEMOED, CLS
-from earl_pytorch.util.util import rotator_to_matrix
+from .. import EARL
+from .create_dataset import get_base_features, normalize, swap_teams, swap_left_right
+from ..util.constants import POS_X, BALL_COLS, DEFAULT_FEATURES_STR, PLAYER_COLS, IS_BLUE, IS_ORANGE, POS_Y, POS_Z, \
+    BOOST_AMOUNT, IS_DEMOED, CLS
+from ..util.util import rotator_to_matrix
 from rlgym.utils.common_values import BOOST_LOCATIONS
 from rlgym.utils.gamestates import GameState
 

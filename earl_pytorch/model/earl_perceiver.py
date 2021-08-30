@@ -4,7 +4,7 @@ import torch
 from torch import nn as nn
 from torch.nn.modules.transformer import _get_activation_fn
 
-from earl_pytorch.util.constants import DEFAULT_FEATURES
+from ..util.constants import DEFAULT_FEATURES
 
 
 class EARLPerceiverBlock(nn.Module):
