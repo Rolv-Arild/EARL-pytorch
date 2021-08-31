@@ -38,7 +38,8 @@ class EARLPerceiver(nn.Module):
             n_heads: int = 4,
             n_preprocess_layers: int = 1,
             n_postprocess_layers: int = 0,
-            n_features: Optional[int] = None
+            query_features: Optional[int] = None,
+            key_value_features: Optional[int] = None
     ):
         """
         EARLPerceiver is an alternative to EARL that uses only a set number of embedding that attend to all the inputs.
@@ -50,28 +51,43 @@ class EARLPerceiver(nn.Module):
         :param n_heads: number of heads in encoder layers.
         :param n_preprocess_layers: number of dense layers before encoder.
         :param n_postprocess_layers: number of dense layers after encoder.
-        :param n_features: number of features in the input (last dimension).
+        :param query_features: number of features in the query input (last dimension).
+        :param key_value_features: number of features in the key_value input (last dimension).
         """
         super().__init__()
+        if query_features is None:
+            query_features = len(DEFAULT_FEATURES)
+        if key_value_features is None:
+            key_value_features = len(DEFAULT_FEATURES)
+
         self.n_dims = n_dims
         self.n_layers = n_layers
         self.n_heads = n_heads
-        self.n_features = n_features or len(DEFAULT_FEATURES)
-        self.initial_dense = nn.Linear(self.n_features, n_dims)
-        self.preprocess = nn.Sequential(*[nn.Linear(n_dims, n_dims) for _ in range(n_preprocess_layers)])
+
+        self.query_preprocess = nn.Sequential(*(
+                [nn.Linear(query_features, n_dims)]
+                + [nn.Linear(n_dims, n_dims) for _ in range(n_preprocess_layers)]
+        ))
+
+        self.key_value_preprocess = nn.Sequential(*(
+                [nn.Linear(key_value_features, n_dims)]
+                + [nn.Linear(n_dims, n_dims) for _ in range(n_preprocess_layers)]
+        ))
 
         self.blocks = nn.ModuleList([EARLPerceiverBlock(n_dims, n_heads) for _ in range(n_layers)])
 
-        self.postprocess = nn.Sequential(*[nn.Linear(n_dims, n_dims) for _ in range(n_postprocess_layers)])
+        if n_postprocess_layers == 0:
+            self.postprocess = nn.Identity()
+        else:
+            self.postprocess = nn.Sequential(*[nn.Linear(n_dims, n_dims) for _ in range(n_postprocess_layers)])
 
     def forward(self, query_entities: torch.Tensor, key_value_entities: torch.Tensor,
                 mask: Optional[torch.Tensor] = None):
-        q_emb = self.initial_dense(query_entities)
-        kv_emb = self.initial_dense(key_value_entities)
+        q_emb = self.query_preprocess(query_entities)
+        kv_emb = self.key_value_preprocess(key_value_entities)
 
-        q_emb = self.preprocess(q_emb)
-        kv_emb = self.preprocess(kv_emb)
         for block in self.blocks:
             q_emb = block(q_emb, kv_emb, mask=mask)
+
         q_emb = self.postprocess(q_emb)
         return q_emb
