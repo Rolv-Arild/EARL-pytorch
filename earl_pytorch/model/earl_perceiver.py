@@ -13,19 +13,14 @@ class EARLPerceiverBlock(nn.Module):
         if dim_feedforward is None:
             dim_feedforward = 2 * n_dims
         self.attention = nn.MultiheadAttention(n_dims, n_heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(n_dims)
-        self.norm2 = nn.LayerNorm(n_dims)
         self.linear1 = nn.Linear(n_dims, dim_feedforward)
         self.linear2 = nn.Linear(dim_feedforward, n_dims)
         self.activation = _get_activation_fn(activation)
 
     def forward(self, src, invariant, mask=None):
-        # Uses Pre-LN
-        src2 = self.norm1(src)
-        src2 = self.attention(src2, invariant, invariant, key_padding_mask=mask)[0]
+        src2 = self.attention(src, invariant, invariant, key_padding_mask=mask)[0]
         src = src + src2
-        src2 = self.norm1(src)
-        src2 = self.linear2(self.activation(self.linear1(src2)))
+        src2 = self.linear2(self.activation(self.linear1(src)))
         src = src + src2
         return src
 
