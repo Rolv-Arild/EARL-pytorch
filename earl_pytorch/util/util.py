@@ -1,4 +1,5 @@
 import numpy as np
+from torch import nn
 
 boost_locations = [
     (0.0, -4240.0, 70.0),
@@ -54,3 +55,14 @@ def rotator_to_matrix(yaw, pitch, roll):
     # right = [cp * sy, sy * sp * sr + cr * cy, -cr * sy * sp + sr * cy]
     # up = [sp, -cp * sr, cp * cr]
     return forward, up
+
+
+class NGPModel(nn.Module):
+    def __init__(self, earl):
+        super().__init__()
+        self.earl = earl
+        self.score = nn.Linear(earl.n_dims, 2)
+
+    def forward(self, *args, **kwargs):
+        o = self.earl(*args, **kwargs)
+        return self.score(o[:, 0, :])

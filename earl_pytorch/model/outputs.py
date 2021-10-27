@@ -51,3 +51,4 @@ class ControlsPredictorDiscrete(nn.Module):
     def forward(self, emb):
         actions = self.linear(emb)
         return torch.split(actions, self.splits, dim=-1)
+

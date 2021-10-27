@@ -1,3 +1,5 @@
+import numpy as np
+
 DEFAULT_FEATURES = (
     CLS,
     IS_BALL, IS_BOOST, IS_BLUE, IS_ORANGE,
@@ -41,3 +43,36 @@ PLAYER_COLS = (POS_X, POS_Y, POS_Z,
                VEL_X, VEL_Y, VEL_Z,
                ANG_VEL_X, ANG_VEL_Y, ANG_VEL_Z,
                BOOST_AMOUNT, IS_DEMOED, ON_GROUND, HAS_FLIP)
+
+NORM_TRANSFORM = np.array([
+    1.,
+    1., 1., 1., 1.,
+    2300., 2300., 2300.,
+    1., 1., 1.,
+    1., 1., 1.,
+    2300., 2300., 2300.,
+    5.5, 5.5, 5.5,
+    100., 1., 1., 1.
+])  # x_norm = x / NORM_TRANSFORM
+
+SWAP_TRANSFORM = np.array([
+    1.,
+    1., 1., 1., 1.,
+    -1., -1., 1.,
+    -1., -1., 1.,
+    -1., -1., 1.,
+    -1., -1., 1.,
+    -1., -1., 1.,
+    1., 1., 1., 1.
+])
+
+MIRROR_TRANSFORM = np.array([
+    1.,
+    1., 1., 1., 1.,
+    -1., 1., 1.,
+    -1., 1., 1.,
+    -1., 1., 1.,
+    -1., 1., 1.,
+    -1., 1., 1.,
+    1., 1., 1., 1.
+])

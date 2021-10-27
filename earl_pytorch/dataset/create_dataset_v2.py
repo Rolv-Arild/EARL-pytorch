@@ -7,7 +7,6 @@ from typing import Tuple, Iterator
 import numpy as np
 import pandas as pd
 import torch
-from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.optim import Adam
 from torch.utils.data.dataset import T_co, IterableDataset
@@ -17,7 +16,7 @@ from .. import EARL
 from .create_dataset import get_base_features, normalize, swap_teams, swap_left_right
 from ..util.constants import POS_X, BALL_COLS, DEFAULT_FEATURES_STR, PLAYER_COLS, IS_BLUE, IS_ORANGE, POS_Y, POS_Z, \
     BOOST_AMOUNT, IS_DEMOED, CLS
-from ..util.util import rotator_to_matrix
+from ..util.util import rotator_to_matrix, NGPModel
 from rlgym.utils.common_values import BOOST_LOCATIONS
 from rlgym.utils.gamestates import GameState
 
@@ -305,17 +304,6 @@ def main():
     all_replays = [os.path.join(dp, f) for dp, dn, fn in os.walk(replay_folder) for f in fn]
 
     process_map(process_replay, all_replays, [output_folder] * len(all_replays), chunksize=5)
-
-
-class NGPModel(nn.Module):
-    def __init__(self, earl):
-        super().__init__()
-        self.earl = earl
-        self.score = nn.Linear(earl.n_dims, 2)
-
-    def forward(self, inp):
-        o = self.earl(inp)
-        return self.score(o[:, 0, :])
 
 
 def earlify(path):
