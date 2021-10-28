@@ -12,13 +12,17 @@ class EPRL(nn.Module):  # Experimental alternative to EARL, P stands for pooling
         self.n_dims = n_dims
         self.n_features = n_features or len(DEFAULT_FEATURES)
 
-        self.initial_fully_connected = nn.Sequential(
-            *([nn.Linear(n_features, n_dims)] + [nn.Linear(n_dims, n_dims) for _ in range(n_hidden - 1)]))
+        self.initial_fully_connected = nn.Sequential(*(
+                [nn.Linear(self.n_features, n_dims), nn.ReLU()]
+                + sum(([nn.Linear(n_dims, n_dims), nn.ReLU()] for _ in range(n_hidden)), start=[])
+        ))
 
         self.max_pool = nn.AdaptiveMaxPool1d(1)
 
-        self.final_fc = nn.Sequential(
-            *([nn.Linear(4 * n_dims, n_dims)] + [nn.Linear(n_dims, n_dims) for _ in range(n_hidden - 1)]))
+        self.final_fc = nn.Sequential(*(
+                [nn.Linear(4 * n_dims, n_dims), nn.ReLU()]
+                + sum(([nn.Linear(n_dims, n_dims), nn.ReLU()] for _ in range(n_hidden)), start=[])
+        ))
 
     def forward(self, main_player: torch.Tensor, other_players: torch.Tensor,
                 balls: torch.Tensor, boosts: torch.Tensor):

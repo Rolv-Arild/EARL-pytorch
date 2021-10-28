@@ -5,6 +5,7 @@ from torch import nn as nn
 from torch.nn.modules.transformer import _get_activation_fn
 
 from ..util.constants import DEFAULT_FEATURES
+from ..util.util import mlp
 
 
 class EARLPerceiverBlock(nn.Module):
@@ -39,7 +40,6 @@ class EARLPerceiver(nn.Module):
         """
         EARLPerceiver is an alternative to EARL that uses only a set number of embedding that attend to all the inputs.
         This reduces complexity from O(n^2) to O(n) and gives improved performance specifically on CPU.
-        Note: it also uses a pre-LN block.
 
         :param n_dims: number of dimensions in the intermediate and output representations.
         :param n_layers: number of encoder layers.
@@ -59,22 +59,15 @@ class EARLPerceiver(nn.Module):
         self.n_layers = n_layers
         self.n_heads = n_heads
 
-        self.query_preprocess = nn.Sequential(*(
-                [nn.Linear(query_features, n_dims)]
-                + [nn.Linear(n_dims, n_dims) for _ in range(n_preprocess_layers)]
-        ))
-
-        self.key_value_preprocess = nn.Sequential(*(
-                [nn.Linear(key_value_features, n_dims)]
-                + [nn.Linear(n_dims, n_dims) for _ in range(n_preprocess_layers)]
-        ))
+        self.query_preprocess = mlp(query_features, n_dims, n_preprocess_layers)
+        self.key_value_preprocess = mlp(key_value_features, n_dims, n_preprocess_layers)
 
         self.blocks = nn.ModuleList([EARLPerceiverBlock(n_dims, n_heads) for _ in range(n_layers)])
 
-        if n_postprocess_layers == 0:
-            self.postprocess = nn.Identity()
+        if n_postprocess_layers > 0:
+            self.postprocess = mlp(n_dims, n_dims, n_postprocess_layers - 1, n_dims)
         else:
-            self.postprocess = nn.Sequential(*[nn.Linear(n_dims, n_dims) for _ in range(n_postprocess_layers)])
+            self.postprocess = nn.Identity()
 
     def forward(self, query_entities: torch.Tensor, key_value_entities: torch.Tensor,
                 mask: Optional[torch.Tensor] = None):

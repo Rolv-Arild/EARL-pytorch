@@ -5,6 +5,7 @@ from torch import nn as nn
 from torch.nn.init import xavier_uniform_
 
 from ..util.constants import DEFAULT_FEATURES
+from ..util.util import mlp
 
 
 class EARL(nn.Module):
@@ -36,10 +37,12 @@ class EARL(nn.Module):
         self.n_layers = n_layers
         self.n_heads = n_heads
 
-        self.initial_dense = nn.Linear(self.n_features, n_dims)
+        self.preprocess = mlp(self.n_features, n_dims, n_preprocess_layers)
+        if n_postprocess_layers > 0:
+            self.postprocess = mlp(n_dims, n_dims, n_postprocess_layers - 1, n_dims)
+        else:
+            self.postprocess = nn.Identity()
 
-        self.preprocess = nn.Sequential(*[nn.Linear(n_dims, n_dims) for _ in range(n_preprocess_layers)])
-        self.postprocess = nn.Sequential(*[nn.Linear(n_dims, n_dims) for _ in range(n_postprocess_layers)])
         if dim_feedforward is None:
             dim_feedforward = 2 * n_dims
 
@@ -47,6 +50,7 @@ class EARL(nn.Module):
             nn.TransformerEncoderLayer(n_dims, n_heads, dim_feedforward, dropout=dropout, batch_first=True)
             for _ in range(n_layers)
         ])
+        self._reset_parameters()
 
     def _reset_parameters(self):
         r"""Initiate parameters in the transformer model. Taken from PyTorch Transformer impl"""

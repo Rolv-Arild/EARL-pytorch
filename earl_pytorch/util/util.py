@@ -66,3 +66,15 @@ class NGPModel(nn.Module):
     def forward(self, *args, **kwargs):
         o = self.earl(*args, **kwargs)
         return self.score(o[:, 0, :])
+
+
+def mlp(in_features, hidden_features, hidden_layers, out_features=None, activation=nn.ReLU):
+    layers = [nn.Linear(in_features, hidden_features), activation()]
+    for _ in range(hidden_layers):
+        layers.extend([
+            nn.Linear(hidden_features, hidden_features),
+            activation()
+        ])
+    if out_features is not None:
+        layers.append(nn.Linear(hidden_features, out_features))
+    return nn.Sequential(*layers)
