@@ -2,6 +2,7 @@ from typing import Optional
 
 import torch
 from torch import nn as nn
+from torch.nn.init import xavier_uniform_
 from torch.nn.modules.transformer import _get_activation_fn
 
 from ..util.constants import DEFAULT_FEATURES
@@ -68,6 +69,14 @@ class EARLPerceiver(nn.Module):
             self.postprocess = mlp(n_dims, n_dims, n_postprocess_layers - 1, n_dims)
         else:
             self.postprocess = nn.Identity()
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        r"""Initiate parameters in the transformer model. Taken from PyTorch Transformer impl"""
+
+        for p in self.parameters():
+            if p.dim() > 1:
+                xavier_uniform_(p)
 
     def forward(self, query_entities: torch.Tensor, key_value_entities: torch.Tensor,
                 mask: Optional[torch.Tensor] = None):
