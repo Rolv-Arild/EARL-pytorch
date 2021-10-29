@@ -69,7 +69,7 @@ class EARLPerceiver(nn.Module):
             self.postprocess = mlp(n_dims, n_dims, n_postprocess_layers - 1, n_dims)
         else:
             self.postprocess = nn.Identity()
-        self._reset_parameters()
+        # self._reset_parameters()
 
     def _reset_parameters(self):
         r"""Initiate parameters in the transformer model. Taken from PyTorch Transformer impl"""
