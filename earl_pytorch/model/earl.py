@@ -50,12 +50,11 @@ class EARL(nn.Module):
             nn.TransformerEncoderLayer(n_dims, n_heads, dim_feedforward, dropout=dropout, batch_first=True)
             for _ in range(n_layers)
         ])
-        # self._reset_parameters()
+        self._reset_parameters()
 
     def _reset_parameters(self):
         r"""Initiate parameters in the transformer model. Taken from PyTorch Transformer impl"""
-
-        for p in self.parameters():
+        for p in self.blocks.parameters():
             if p.dim() > 1:
                 xavier_uniform_(p)
 

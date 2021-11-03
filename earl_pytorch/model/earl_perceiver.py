@@ -16,8 +16,17 @@ class EARLPerceiverBlock(nn.Module):
             dim_feedforward = 2 * n_dims
         self.attention = nn.MultiheadAttention(n_dims, n_heads, batch_first=True)
         self.linear1 = nn.Linear(n_dims, dim_feedforward)
+        # self.norm1 = nn.LayerNorm(n_dims)
         self.linear2 = nn.Linear(dim_feedforward, n_dims)
+        # self.norm2 = nn.LayerNorm(n_dims)
         self.activation = _get_activation_fn(activation)
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        r"""Initiate parameters in the transformer model. Taken from PyTorch Transformer impl"""
+        for p in self.parameters():
+            if p.dim() > 1:
+                xavier_uniform_(p)
 
     def forward(self, src, invariant, mask=None):
         src2 = self.attention(src, invariant, invariant, key_padding_mask=mask)[0]
@@ -69,14 +78,6 @@ class EARLPerceiver(nn.Module):
             self.postprocess = mlp(n_dims, n_dims, n_postprocess_layers - 1, n_dims)
         else:
             self.postprocess = nn.Identity()
-        # self._reset_parameters()
-
-    def _reset_parameters(self):
-        r"""Initiate parameters in the transformer model. Taken from PyTorch Transformer impl"""
-
-        for p in self.parameters():
-            if p.dim() > 1:
-                xavier_uniform_(p)
 
     def forward(self, query_entities: torch.Tensor, key_value_entities: torch.Tensor,
                 mask: Optional[torch.Tensor] = None):
