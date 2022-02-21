@@ -1,11 +1,25 @@
 from typing import Optional
 
 import torch
-from torch import nn as nn
+from torch import nn as nn, Tensor
 from torch.nn.init import xavier_uniform_
 
 from ..util.constants import DEFAULT_FEATURES
 from ..util.util import mlp
+
+
+class _PreLNTransformerEncoder(nn.TransformerEncoderLayer):
+    def forward(self, src: Tensor, src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None) -> Tensor:
+        """Simple override of TransformerEncoderLayer to do Pre-LN (https://arxiv.org/abs/2002.04745)"""
+        src2 = self.norm1(src)
+        src2 = self.self_attn(src2, src2, src2, attn_mask=src_mask,
+                              key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)
+        src2 = self.norm2(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
+        src = src + self.dropout2(src2)
+        return src
 
 
 class EARL(nn.Module):
@@ -18,7 +32,8 @@ class EARL(nn.Module):
             n_postprocess_layers: int = 0,
             dropout: float = 0.,
             n_features: Optional[int] = None,
-            dim_feedforward: Optional[int] = None
+            dim_feedforward: Optional[int] = None,
+            pre_ln=True
     ):
         """
         Create an EARL (Extensible Attention-based Rocket League) model
@@ -30,12 +45,14 @@ class EARL(nn.Module):
         :param n_postprocess_layers: number of dense layers after encoder.
         :param dropout: dropout for encoder layers.
         :param n_features: number of features in the input (last dimension).
+        :param pre_ln: whether or not to do pre-layer norm instead of post (see https://arxiv.org/abs/2002.04745)
         """
         super().__init__()
         self.n_features = n_features or len(DEFAULT_FEATURES)
         self.n_dims = n_dims
         self.n_layers = n_layers
         self.n_heads = n_heads
+        self.pre_ln = pre_ln
 
         self.preprocess = mlp(self.n_features, n_dims, n_preprocess_layers)
         if n_postprocess_layers > 0:
@@ -46,8 +63,9 @@ class EARL(nn.Module):
         if dim_feedforward is None:
             dim_feedforward = 2 * n_dims
 
+        encoder_layer = _PreLNTransformerEncoder if pre_ln else nn.TransformerEncoderLayer
         self.blocks = nn.ModuleList([
-            nn.TransformerEncoderLayer(n_dims, n_heads, dim_feedforward, dropout=dropout, batch_first=True)
+            encoder_layer(n_dims, n_heads, dim_feedforward, dropout=dropout, batch_first=True)
             for _ in range(n_layers)
         ])
         self._reset_parameters()

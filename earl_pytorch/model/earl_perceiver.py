@@ -10,16 +10,32 @@ from ..util.util import mlp
 
 
 class EARLPerceiverBlock(nn.Module):
-    def __init__(self, n_dims, n_heads, activation="relu", dim_feedforward=None):
+    def __init__(self, n_dims, n_heads, activation="relu", dim_feedforward=None, concatenate=False, use_norm=True,
+                 return_weights=False):
         super().__init__()
         if dim_feedforward is None:
-            dim_feedforward = 2 * n_dims
+            dim_feedforward = 4 * n_dims
+        self.concatenate = concatenate
+
+        # Layers
         self.attention = nn.MultiheadAttention(n_dims, n_heads, batch_first=True)
-        self.linear1 = nn.Linear(n_dims, dim_feedforward)
-        # self.norm1 = nn.LayerNorm(n_dims)
+        self.linear1 = nn.Linear((1 + self.concatenate) * n_dims, dim_feedforward)
         self.linear2 = nn.Linear(dim_feedforward, n_dims)
-        # self.norm2 = nn.LayerNorm(n_dims)
+
         self.activation = _get_activation_fn(activation)
+
+        self.use_norm = use_norm
+        if use_norm:
+            self.norm1 = nn.LayerNorm(n_dims)
+            self.norm2 = nn.LayerNorm(n_dims)
+            self.norm3 = nn.LayerNorm(n_dims)
+        else:
+            self.norm1 = nn.Identity()
+            self.norm2 = nn.Identity()
+            self.norm3 = nn.Identity()
+
+        self.return_weights = return_weights
+
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -29,11 +45,19 @@ class EARLPerceiverBlock(nn.Module):
                 xavier_uniform_(p)
 
     def forward(self, src, invariant, mask=None):
-        src2 = self.attention(src, invariant, invariant, key_padding_mask=mask)[0]
+        src2 = self.norm1(src)
+        invariant = self.norm2(invariant)
+        src2, weights = self.attention(src2, invariant, invariant, key_padding_mask=mask)
+
+        src = torch.cat((src, src2), dim=-1) if self.concatenate else (src + src2)
+
+        src2 = self.norm3(src)
+        src2 = self.linear2(self.activation(self.linear1(src2)))
+
+        # src = torch.cat((src, src2), dim=-1) if self.concatenate else (src + src2)
         src = src + src2
-        src2 = self.linear2(self.activation(self.linear1(src)))
-        src = src + src2
-        return src
+
+        return src, weights
 
 
 class EARLPerceiver(nn.Module):
@@ -45,7 +69,8 @@ class EARLPerceiver(nn.Module):
             n_preprocess_layers: int = 1,
             n_postprocess_layers: int = 0,
             query_features: Optional[int] = None,
-            key_value_features: Optional[int] = None
+            key_value_features: Optional[int] = None,
+            return_weights=False
     ):
         """
         EARLPerceiver is an alternative to EARL that uses only a set number of embedding that attend to all the inputs.
@@ -68,6 +93,7 @@ class EARLPerceiver(nn.Module):
         self.n_dims = n_dims
         self.n_layers = n_layers
         self.n_heads = n_heads
+        self.return_weights = return_weights
 
         self.query_preprocess = mlp(query_features, n_dims, n_preprocess_layers)
         self.key_value_preprocess = mlp(key_value_features, n_dims, n_preprocess_layers)
@@ -84,8 +110,13 @@ class EARLPerceiver(nn.Module):
         q_emb = self.query_preprocess(query_entities)
         kv_emb = self.key_value_preprocess(key_value_entities)
 
+        weights = []
         for block in self.blocks:
-            q_emb = block(q_emb, kv_emb, mask=mask)
+            q_emb, w = block(q_emb, kv_emb, mask=mask)
+            weights.append(w)
 
         q_emb = self.postprocess(q_emb)
+
+        if self.return_weights:
+            return q_emb, tuple(weights)
         return q_emb

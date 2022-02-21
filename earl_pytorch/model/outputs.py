@@ -1,5 +1,10 @@
+from typing import Optional
+
 import torch
 from torch import nn as nn
+
+from earl_pytorch.util.util import mlp
+from training.parser import NectoActionTEST
 
 
 class NextGoalPredictor(nn.Linear):
@@ -52,3 +57,22 @@ class ControlsPredictorDiscrete(nn.Module):
         actions = self.linear(emb)
         return torch.split(actions, self.splits, dim=-1)
 
+
+class ControlsPredictorDot(nn.Module):
+    def __init__(self, features=32, layers=2, actions=None):
+        super().__init__()
+        if actions is None:
+            self.actions = torch.from_numpy(NectoActionTEST.make_lookup_table()).float()
+        else:
+            self.actions = torch.from_numpy(actions).float()
+        self.net = mlp(8, features, layers)
+        self.emb_convertor = nn.LazyLinear(features)
+
+    def forward(self, player_emb: torch.Tensor, actions: Optional[torch.Tensor] = None):
+        if actions is None:
+            actions = self.actions
+        player_emb = self.emb_convertor(player_emb)
+        act_emb = self.net(actions)
+        if act_emb.ndim == 3:
+            return torch.einsum("bad,bpd->bpa", act_emb, player_emb)
+        return torch.einsum("ad,bpd->bpa", act_emb, player_emb)

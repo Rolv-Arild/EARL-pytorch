@@ -1,9 +1,11 @@
 import json
 import os
 import subprocess
+import sys
 import time
 from typing import Tuple, Iterator
 
+import ballchasing
 import numpy as np
 import pandas as pd
 import torch
@@ -12,11 +14,11 @@ from torch.optim import Adam
 from torch.utils.data.dataset import T_co, IterableDataset
 from tqdm.contrib.concurrent import process_map
 
-from .. import EARL
-from .create_dataset import get_base_features, normalize, swap_teams, swap_left_right
-from ..util.constants import POS_X, BALL_COLS, DEFAULT_FEATURES_STR, PLAYER_COLS, IS_BLUE, IS_ORANGE, POS_Y, POS_Z, \
-    BOOST_AMOUNT, IS_DEMOED, CLS
-from ..util.util import rotator_to_matrix, NGPModel
+from earl_pytorch import EARL
+from earl_pytorch.dataset.create_dataset import get_base_features, normalize, swap_teams, swap_left_right
+from earl_pytorch.util.constants import POS_X, BALL_COLS, DEFAULT_FEATURES_STR, PLAYER_COLS, IS_BLUE, IS_ORANGE, POS_Y, \
+    POS_Z, BOOST_AMOUNT, IS_DEMOED, CLS
+from earl_pytorch.util.util import rotator_to_matrix, NGPModel
 from rlgym.utils.common_values import BOOST_LOCATIONS
 from rlgym.utils.gamestates import GameState
 
@@ -83,14 +85,14 @@ class CarballAnalysis:
 
     def to_rlgym(self) -> Iterator[Tuple[GameState, np.ndarray]]:
         ball = self.ball.copy()
-        ball[["quat_w", "quat_x", "quat_y", "quat_z"]] = \
-            np.asarray(euler_to_quaternion(ball["rot_pitch"], ball["rot_yaw"], ball["rot_roll"])).T
+        # ball[["quat_w", "quat_x", "quat_y", "quat_z"]] = \
+        #     np.asarray(euler_to_quaternion(ball["rot_pitch"], ball["rot_yaw"], ball["rot_roll"])).T
         game = self.game.copy()
         players = {}
         for uid, player_df in self.players.items():
             player_df = player_df.copy()
-            player_df[["quat_w", "quat_x", "quat_y", "quat_z"]] = \
-                np.asarray(euler_to_quaternion(player_df["rot_pitch"], player_df["rot_yaw"], player_df["rot_roll"])).T
+            # player_df[["quat_w", "quat_x", "quat_y", "quat_z"]] = \
+            #     np.asarray(euler_to_quaternion(player_df["rot_pitch"], player_df["rot_yaw"], player_df["rot_roll"])).T
             players[uid] = player_df
 
         df = pd.DataFrame(index=game.index)
@@ -293,9 +295,31 @@ class ReplayDataset(IterableDataset):
 
 
 def main():
-    replay_folder = r"D:\rokutleg\replays\rlcsx\rlcs-x-whqc4pi1kw"
+    group = "rlcs-x-whqc4pi1kw"
+    replay_folder = r"D:\rokutleg\replays\rlcsx"
     output_folder = r"D:\rokutleg\processed\rlcsx"
-    all_replays = [os.path.join(dp, f) for dp, dn, fn in os.walk(replay_folder) for f in fn]
+    os.makedirs(replay_folder, exist_ok=True)
+
+    if len(sys.argv) > 1:
+        key = sys.argv[1]
+        bc_api = ballchasing.Api(key)
+        folder = os.path.join(replay_folder, group)
+        os.makedirs(folder, exist_ok=True)
+
+        with open(os.path.join(replay_folder, "replay_info.ijson"), "w") as info:
+            for replay in bc_api.get_group_replays(group):
+                try:
+                    bc_api.download_replay(replay["id"], folder)
+                    info.write(json.dumps(replay) + "\n")
+                except Exception as e:
+                    print(e)
+
+    all_replays = [
+        os.path.join(dp, f)
+        for dp, dn, fn in os.walk(replay_folder)
+        for f in fn
+        if f.endswith(".replay")
+    ]
 
     process_map(process_replay, all_replays, [output_folder] * len(all_replays), chunksize=5)
 
@@ -392,8 +416,8 @@ def train():
 
 
 if __name__ == '__main__':
-    train()
-    # main()
+    # train()
+    main()
     exit(0)
     t0 = time.time()
     ca = CarballAnalysis(r"D:\rokutleg\processed\rlcsx\00b8df8c-0088-4560-91b0-a9b9586cc183")
