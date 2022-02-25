@@ -10,7 +10,7 @@ from ..util.util import mlp
 
 
 class EARLPerceiverBlock(nn.Module):
-    def __init__(self, n_dims, n_heads, activation="relu", dim_feedforward=None, concatenate=False, use_norm=True,
+    def __init__(self, n_dims, n_heads, activation="relu", dim_feedforward=None, concatenate=False, use_norm=False,
                  return_weights=False):
         super().__init__()
         if dim_feedforward is None:
@@ -95,10 +95,17 @@ class EARLPerceiver(nn.Module):
         self.n_heads = n_heads
         self.return_weights = return_weights
 
-        self.query_preprocess = mlp(query_features, n_dims, n_preprocess_layers)
-        self.key_value_preprocess = mlp(key_value_features, n_dims, n_preprocess_layers)
+        if n_preprocess_layers > 0:
+            self.query_preprocess = mlp(query_features, n_dims, n_preprocess_layers)
+            self.key_value_preprocess = mlp(key_value_features, n_dims, n_preprocess_layers)
+        else:
+            self.query_preprocess = nn.Identity()
+            self.key_value_preprocess = nn.Identity()
 
-        self.blocks = nn.ModuleList([EARLPerceiverBlock(n_dims, n_heads) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList([
+            EARLPerceiverBlock(n_dims, n_heads)
+            for _ in range(n_layers)
+        ])
 
         if n_postprocess_layers > 0:
             self.postprocess = mlp(n_dims, n_dims, n_postprocess_layers - 1, n_dims)
