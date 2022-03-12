@@ -10,7 +10,7 @@ from ..util.util import mlp
 
 
 class EARLPerceiverBlock(nn.Module):
-    def __init__(self, n_dims, n_heads, activation="relu", dim_feedforward=None, concatenate=False, use_norm=False,
+    def __init__(self, n_dims, n_heads, activation="relu", dim_feedforward=None, concatenate=False, use_norm=True,
                  return_weights=False):
         super().__init__()
         if dim_feedforward is None:
