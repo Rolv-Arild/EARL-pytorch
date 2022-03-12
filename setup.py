@@ -6,7 +6,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name='EARL-pytorch',
-    version='0.4.3',
+    version='0.5.0',
     packages=setuptools.find_packages(),
     install_requires=[
         "torch>=1.9.0",
