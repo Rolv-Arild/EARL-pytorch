@@ -62,7 +62,7 @@ class EARL(nn.Module):
 
         if dim_feedforward is None:
             dim_feedforward = 2 * n_dims
-
+        self.initial_dense = nn.Linear(n_features, n_dims)
         encoder_layer = _PreLNTransformerEncoder if pre_ln else nn.TransformerEncoderLayer
         self.blocks = nn.ModuleList([
             encoder_layer(n_dims, n_heads, dim_feedforward, dropout=dropout, batch_first=True)
