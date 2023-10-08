@@ -3,15 +3,14 @@ from typing import Optional
 import torch
 from torch import nn as nn
 from torch.nn.init import xavier_uniform_
-from torch.nn.modules.transformer import _get_activation_fn
+import torch.nn.functional as F
 
 from ..util.constants import DEFAULT_FEATURES
 from ..util.util import mlp
 
 
 class EARLPerceiverBlock(nn.Module):
-    def __init__(self, n_dims, n_heads, activation="relu", dim_feedforward=None, concatenate=False, use_norm=True,
-                 return_weights=False):
+    def __init__(self, n_dims, n_heads, activation=F.relu, dim_feedforward=None, concatenate=False, use_norm=True):
         super().__init__()
         if dim_feedforward is None:
             dim_feedforward = 4 * n_dims
@@ -22,7 +21,7 @@ class EARLPerceiverBlock(nn.Module):
         self.linear1 = nn.Linear((1 + self.concatenate) * n_dims, dim_feedforward)
         self.linear2 = nn.Linear(dim_feedforward, n_dims)
 
-        self.activation = _get_activation_fn(activation)
+        self.activation = activation
 
         self.use_norm = use_norm
         if use_norm:
@@ -33,8 +32,6 @@ class EARLPerceiverBlock(nn.Module):
             self.norm1 = nn.Identity()
             self.norm2 = nn.Identity()
             self.norm3 = nn.Identity()
-
-        self.return_weights = return_weights
 
         self._reset_parameters()
 
@@ -70,7 +67,8 @@ class EARLPerceiver(nn.Module):
             n_postprocess_layers: int = 0,
             query_features: Optional[int] = None,
             key_value_features: Optional[int] = None,
-            return_weights=False
+            return_weights=False,
+            activation=F.relu
     ):
         """
         EARLPerceiver is an alternative to EARL that uses only a set number of embedding that attend to all the inputs.
@@ -103,7 +101,7 @@ class EARLPerceiver(nn.Module):
             self.key_value_preprocess = nn.Identity()
 
         self.blocks = nn.ModuleList([
-            EARLPerceiverBlock(n_dims, n_heads)
+            EARLPerceiverBlock(n_dims, n_heads, activation=activation)
             for _ in range(n_layers)
         ])
 
